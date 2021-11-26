@@ -371,7 +371,7 @@ let is_foreign_a_structure (pt: Ast.parameter_type) =
   match pt with
     | Ast.PTVal(atype)
     | Ast.PTPtr(atype, _) -> is_foreign_atype atype
-    | _                   -> (false, "")
+    (* | _                   -> (false, "") *)
 
 (* Check duplicated structure definition and illegal usage.
  *)
@@ -673,7 +673,7 @@ let gen_ufunc_proto (uf: Ast.untrusted_func) =
   let cconv_str = "SGX_" ^ Ast.get_call_conv_str uf.Ast.uf_fattr.Ast.fa_convention in
   let func_name = uf.Ast.uf_fdecl.Ast.fname in
   let plist_str = get_plist_str uf.Ast.uf_fdecl in
-  let func_guard = sprintf "%s_DEFINED__" (String.uppercase func_name) in 
+  let func_guard = sprintf "%s_DEFINED__" (String.uppercase_ascii func_name) in 
     sprintf "#ifndef %s\n#define %s\n%s%s SGX_UBRIDGE(%s, %s, (%s));\n#endif"
             func_guard func_guard dllimport ret_tystr cconv_str func_name plist_str
 
@@ -702,7 +702,7 @@ let ms_writer out_chan ec =
 (* Generate untrusted header for enclave *)
 let gen_untrusted_header (ec: enclave_content) =
   let header_fname = get_uheader_name ec.file_shortnm in
-  let guard_macro = sprintf "%s_U_H__" (String.uppercase ec.enclave_name) in
+  let guard_macro = sprintf "%s_U_H__" (String.uppercase_ascii ec.enclave_name) in
   let preemble_code =
     let include_list = gen_include_list (ec.include_list @ !untrusted_headers) in
       gen_uheader_preemble guard_macro include_list
@@ -735,7 +735,7 @@ let gen_theader_preemble (guard: string) (inclist: string) =
 (* Generate trusted header for enclave *)
 let gen_trusted_header (ec: enclave_content) =
   let header_fname = get_theader_name ec.file_shortnm in
-  let guard_macro = sprintf "%s_T_H__" (String.uppercase ec.enclave_name) in
+  let guard_macro = sprintf "%s_T_H__" (String.uppercase_ascii ec.enclave_name) in
   let guard_code =
     let include_list = gen_include_list (ec.include_list @ !trusted_headers) in
       gen_theader_preemble guard_macro include_list in
@@ -1656,6 +1656,25 @@ let gen_tbridge_local_vars (plist: Ast.pdecl list) =
   in
     str ^ if deep_copy then "\tsize_t i = 0;\n" else ""
 
+let instrument_sgxsan_user_check (pd: Ast.pdecl) : string =
+  let (pt, declr) = pd in
+  let ptr_name = mk_parm_accessor declr.Ast.identifier in
+  let get_ptr_size = function
+    | Ast.Ptr(Ast.Void) -> "1 /* size of void type */"
+    | _ -> "sizeof(*" ^ ptr_name ^ ")"
+  in
+  match pt with
+  | Ast.PTVal _ -> ""
+  | Ast.PTPtr(ty, attr) ->
+    if not attr.Ast.pa_chkptr then
+      "\tsgxsan_user_check((uint64_t)" ^ ptr_name ^ ", " ^ (get_ptr_size ty) ^ ");\n"
+    else
+      ""
+
+let sgxsan_check_plist (plist: Ast.pdecl list) : string =
+  let statement_list = List.map (fun p -> instrument_sgxsan_user_check p) plist in
+  String.concat "" statement_list
+
 (* It generates trusted bridge code for a trusted function. *)
 let gen_func_tbridge (fd: Ast.func_decl) (dummy_var: string) =
   let func_open = sprintf "static sgx_status_t SGX_CDECL %s(void* %s)\n{\n"
@@ -1682,10 +1701,11 @@ let gen_func_tbridge (fd: Ast.func_decl) (dummy_var: string) =
       in
         sprintf "%s%s%s\t%s\n\t%s\n%s" func_open local_vars dummy_var check_pms invoke_func func_close
     else
-      sprintf "%s%s\t%s\n%s\n%s%s\n%s\n\t%s\n%s\n%s\n%s%s"
+      sprintf "%s%s\t%s\n%s\n%s%s%s\n%s\n\t%s\n%s\n%s\n%s%s"
         func_open
         (mk_check_pms fd.Ast.fname)
         declare_ms_ptr
+        (sgxsan_check_plist fd.Ast.plist)
         local_vars
         (gen_check_tbridge_length_overflow fd.Ast.plist)
         (gen_check_tbridge_ptr_parms fd.Ast.plist)
@@ -2263,6 +2283,8 @@ let gen_trusted_source (ec: enclave_content) =
 #include <errno.h>\n\
 #include <mbusafecrt.h> /* for memcpy_s etc */\n\
 #include <stdlib.h> /* for malloc/free etc */\n\
+\n\
+void sgxsan_user_check(uint64_t ptr, uint64_t len);
 \n\
 #define CHECK_REF_POINTER(ptr, siz) do {\t\\\n\
 \tif (!(ptr) || ! sgx_is_outside_enclave((ptr), (siz)))\t\\\n\
