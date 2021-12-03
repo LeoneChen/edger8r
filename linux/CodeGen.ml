@@ -1656,23 +1656,83 @@ let gen_tbridge_local_vars (plist: Ast.pdecl list) =
   in
     str ^ if deep_copy then "\tsize_t i = 0;\n" else ""
 
-let instrument_sgxsan_user_check (pd: Ast.pdecl) : string =
+let is_int_type = function
+  | Ast.Long _ | Ast.LLong _ | Ast.Int _ | Ast.Int8 | Ast.Int16 | Ast.Int32
+  | Ast.Int64 | Ast.UInt8 | Ast.UInt16 | Ast.UInt32 | Ast.UInt64 | Ast.SizeT -> true
+  | _ -> false
+
+let get_size_param (pd: Ast.pdecl) =
   let (pt, declr) = pd in
-  let ptr_name = mk_parm_accessor declr.Ast.identifier in
-  let get_ptr_size = function
-    | Ast.Ptr(Ast.Void) -> "1 /* size of void type */"
-    | _ -> "sizeof(*" ^ ptr_name ^ ")"
-  in
+  match pt with
+  | Ast.PTPtr(_, _) -> None
+  | Ast.PTVal ty ->
+    if (is_int_type ty) then
+      Some declr.Ast.identifier
+    else
+      None
+
+let rec get_size_params (plist: Ast.pdecl list) =
+  match plist with
+  | [] -> []
+  | pd::remained_plist ->
+    let size_param = get_size_param pd in
+    let remained_size_params = get_size_params remained_plist in
+    match size_param with
+    | None -> remained_size_params
+    | Some _str -> _str::remained_size_params
+
+exception SGXSanErr of string
+
+let get_type_size (ty: Ast.atype) =
+  match ty with
+  | Ast.Void -> "1 /* size of void type */"
+  | _ -> "sizeof(" ^ (Ast.get_tystr ty) ^ ")"
+
+let rec __instrument_ptr_check (ty: Ast.atype) (id: string) =
+  (* print_endline("\t" ^ Ast.get_tystr ty);
+  print_string("\tdims = ");
+  List.iter (fun dim -> print_string(string_of_int(dim) ^ " ")) dims;
+  print_newline(); *)
+  match ty with
+  | Ast.Ptr pointee_type ->
+    "\tsgxsan_user_check((uint64_t)" ^ id ^ ", " ^ (get_type_size pointee_type) ^ ", -1);\n"
+      ^ (__instrument_ptr_check pointee_type ("*" ^ id))
+  | _ -> ""
+
+let __instrument_arr_check (ty: Ast.atype) (id: string) (dims: int list) =
+  match ty with
+  | Ast.Ptr _ -> raise (SGXSanErr "[__instrument_arr_check] Ast.Ptr")
+  | _ ->
+    let hint_cnt = ref "" in
+    if List.length dims <> 0 then
+      begin
+      hint_cnt := string_of_int(List.hd dims);
+      List.iter (fun dim -> hint_cnt := !hint_cnt ^ " * " ^ (if dim = -1 then "1024" else string_of_int(dim))) (List.tl dims);
+      end
+    else
+      hint_cnt := "1";
+    "\tsgxsan_user_check((uint64_t)" ^ id ^ ", " ^ (get_type_size ty) ^ ", " ^ !hint_cnt ^ ");\n"
+
+let instrument_sgxsan_check (pd: Ast.pdecl) =
+  let (pt, declr) = pd in
   match pt with
   | Ast.PTVal _ -> ""
   | Ast.PTPtr(ty, attr) ->
     if not attr.Ast.pa_chkptr then
-      "\tsgxsan_user_check((uint64_t)" ^ ptr_name ^ ", " ^ (get_ptr_size ty) ^ ");\n"
+      (* flexible array, pointer-array and array-pointer are not allowed in edge *)
+      begin
+      match ty with
+      | Ast.Ptr _ ->
+        __instrument_ptr_check ty (mk_parm_accessor declr.Ast.identifier)
+      | _ ->
+        __instrument_arr_check ty (mk_parm_accessor declr.Ast.identifier) declr.Ast.array_dims
+      end
     else
       ""
 
 let sgxsan_check_plist (plist: Ast.pdecl list) : string =
-  let statement_list = List.map (fun p -> instrument_sgxsan_user_check p) plist in
+  (* let size_params = get_size_params plist in *)
+  let statement_list = List.map (fun param -> instrument_sgxsan_check param) plist in
   String.concat "" statement_list
 
 (* It generates trusted bridge code for a trusted function. *)
@@ -1694,23 +1754,26 @@ let gen_func_tbridge (fd: Ast.func_decl) (dummy_var: string) =
   let update_retval = sprintf "%s = %s"
                               (mk_parm_accessor retval_name)
                               invoke_func in
-
+  let whitelist_init = "\n\tWhitelistOfAddrOutEnclave_init();\n" in
+  let whitelist_destroy = "\n\tWhitelistOfAddrOutEnclave_destroy();\n" in
     if is_naked_func fd then
       let check_pms =
         sprintf "if (%s != NULL) return SGX_ERROR_INVALID_PARAMETER;" ms_ptr_name
       in
         sprintf "%s%s%s\t%s\n\t%s\n%s" func_open local_vars dummy_var check_pms invoke_func func_close
     else
-      sprintf "%s%s\t%s\n%s\n%s%s%s\n%s\n\t%s\n%s\n%s\n%s%s"
+      sprintf "%s%s\t%s\n%s\n%s\n%s%s%s\n%s\n\t%s\n%s\n%s\n%s\n%s%s"
         func_open
         (mk_check_pms fd.Ast.fname)
         declare_ms_ptr
+        whitelist_init
         (sgxsan_check_plist fd.Ast.plist)
         local_vars
         (gen_check_tbridge_length_overflow fd.Ast.plist)
         (gen_check_tbridge_ptr_parms fd.Ast.plist)
         (gen_parm_ptr_direction_pre fd.Ast.plist)
         (if fd.Ast.rtype <> Ast.Void then update_retval else invoke_func)
+        whitelist_destroy
         (gen_parm_ptr_direction_post fd.Ast.plist)
         (gen_err_mark fd.Ast.plist)
         (gen_parm_ptr_free_post fd.Ast.plist)
@@ -2284,7 +2347,9 @@ let gen_trusted_source (ec: enclave_content) =
 #include <mbusafecrt.h> /* for memcpy_s etc */\n\
 #include <stdlib.h> /* for malloc/free etc */\n\
 \n\
-void sgxsan_user_check(uint64_t ptr, uint64_t len);
+void sgxsan_user_check(uint64_t ptr, uint64_t len, int cnt);
+void WhitelistOfAddrOutEnclave_init(void);
+void WhitelistOfAddrOutEnclave_destroy(void);
 \n\
 #define CHECK_REF_POINTER(ptr, siz) do {\t\\\n\
 \tif (!(ptr) || ! sgx_is_outside_enclave((ptr), (siz)))\t\\\n\
