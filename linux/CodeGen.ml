@@ -1695,7 +1695,7 @@ let rec __instrument_ptr_check (ty: Ast.atype) (id: string) =
   print_newline(); *)
   match ty with
   | Ast.Ptr pointee_type ->
-    "\tsgxsan_user_check((uint64_t)" ^ id ^ ", " ^ (get_type_size pointee_type) ^ ", -1);\n"
+    "\tsgxsan_edge_check((uint64_t)" ^ id ^ ", " ^ (get_type_size pointee_type) ^ ", -1);\n"
       ^ (__instrument_ptr_check pointee_type ("*" ^ id))
   | _ -> ""
 
@@ -1711,7 +1711,7 @@ let __instrument_arr_check (ty: Ast.atype) (id: string) (dims: int list) =
       end
     else
       hint_cnt := "1";
-    "\tsgxsan_user_check((uint64_t)" ^ id ^ ", " ^ (get_type_size ty) ^ ", " ^ !hint_cnt ^ ");\n"
+    "\tsgxsan_edge_check((uint64_t)" ^ id ^ ", " ^ (get_type_size ty) ^ ", " ^ !hint_cnt ^ ");\n"
 
 let instrument_sgxsan_check (pd: Ast.pdecl) =
   let (pt, declr) = pd in
@@ -2347,7 +2347,7 @@ let gen_trusted_source (ec: enclave_content) =
 #include <mbusafecrt.h> /* for memcpy_s etc */\n\
 #include <stdlib.h> /* for malloc/free etc */\n\
 \n\
-void sgxsan_user_check(uint64_t ptr, uint64_t len, int cnt);
+void sgxsan_edge_check(uint64_t ptr, uint64_t len, int cnt);
 void WhitelistOfAddrOutEnclave_init(void);
 void WhitelistOfAddrOutEnclave_destroy(void);
 \n\
