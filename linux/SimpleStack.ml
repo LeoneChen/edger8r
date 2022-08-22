@@ -30,11 +30,17 @@
  *)
 
 type 'a t = { mutable c : 'a list }
+
 exception Empty
+
 let create () = { c = [] }
 let push x s = s.c <- x :: s.c
+
 let pop s =
   match s.c with
-      hd::tl -> s.c <- tl; hd
-    | []     -> raise Empty
+  | hd :: tl ->
+      s.c <- tl;
+      hd
+  | [] -> raise Empty
+
 let mem x s = List.mem x s.c
