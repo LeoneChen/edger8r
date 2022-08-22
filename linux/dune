@@ -1,0 +1,14 @@
+(executable
+ (public_name edger8r)
+ (name Edger8r)
+ (libraries str unix)
+ (modes byte))
+
+(ocamllex Lexer)
+
+(ocamlyacc Parser)
+
+(env
+ (dev
+  (flags
+   (:standard -w -11-27-39-32))))
