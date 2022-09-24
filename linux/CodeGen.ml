@@ -3179,7 +3179,6 @@ let ec2json_file (ec : enclave_content) : unit =
 (* Generate the Enclave code. *)
 let gen_enclave_code (e : Ast.enclave) (ep : edger8r_params) =
   let ec = reduce_import (parse_enclave_ast e) in
-  ignore (ec2json_file ec);
   g_use_prefix := ep.use_prefix;
   g_untrusted_dir := ep.untrusted_dir;
   g_trusted_dir := ep.trusted_dir;
@@ -3195,5 +3194,6 @@ let gen_enclave_code (e : Ast.enclave) (ep : edger8r_params) =
       gen_untrusted_header ec;
       if not ep.header_only then gen_untrusted_source ec);
     if ep.gen_trusted then (
+      ignore (ec2json_file ec);
       gen_trusted_header ec;
       if not ep.header_only then gen_trusted_source ec))
