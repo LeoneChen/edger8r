@@ -91,6 +91,11 @@ type edger8r_params = {
  *)
 let search_paths = ref [| "." |]
 
+(* The header files' include paths are recored in the array below.
+ * W/o extra include paths specified, edger8r searchs from current directory.
+ *)
+let include_paths = ref [| "." |]
+
 (* The path separator is usually ':' on Linux and ';' on Windows.
  * Concerning that we might compile this code with OCaml on Windows,
  * we'd better don't assume that ':' is always used.
@@ -146,6 +151,15 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
               let extra_path_arry = Array.of_list extra_paths in
               search_paths := Array.append extra_path_arry !search_paths;
               local_parser (List.tl ops)
+        | "--include-path" ->
+            (* Similar to --search-path *)
+            if ops = [] then usage progname
+            else
+              let include_path_str = List.hd ops in
+              let extra_paths = splitwith path_separator include_path_str in
+              let extra_path_arry = Array.of_list extra_paths in
+              include_paths := Array.append extra_path_arry !include_paths;
+              local_parser (List.tl ops)
         | _ ->
             files := op :: !files;
             local_parser ops)
@@ -185,6 +199,17 @@ let get_file_path (fname : string) =
   let fn_list = Array.to_list targets in
   try List.find Sys.file_exists fn_list
   with Not_found -> failwithf "File not found within search paths: %s\n" fname
+
+(* Similar to get_file_path *)
+let get_header_path (fname : string) =
+  let get_full_name path =
+    if Filename.is_relative fname then path ^ separator_str ^ fname else fname
+  in
+  let targets = Array.map get_full_name !include_paths in
+  let fn_list = Array.to_list targets in
+  try List.find Sys.file_exists fn_list
+  with Not_found ->
+    failwithf "File not found within include paths: %s\n" fname
 
 (* Get the short name of the given file name.
  * ------------------------------------------

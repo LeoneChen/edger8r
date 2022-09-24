@@ -393,10 +393,9 @@ let is_foreign_a_structure (pt : Ast.parameter_type) =
   in
   match pt with
   | Ast.PTVal atype | Ast.PTPtr (atype, _) -> is_foreign_atype atype
-  | _ -> (false, "")
 
 (* Check duplicated structure definition and illegal usage.
- *)
+         *)
 let check_structure (ec : enclave_content) =
   let trusted_fds = tf_list_to_fd_list ec.tfunc_decls in
   let untrusted_fds = uf_list_to_fd_list ec.ufunc_decls in
@@ -2836,7 +2835,7 @@ let check_priv_funcs (ec : enclave_content) =
  * importing file to get an `enclave_content' record, recursively.
  *
  * `ec' is the toplevel `enclave_content' record.
-
+        
  * Here, a tree reduce algorithm is used. `ec' is the root-node, each
  * `import' expression is considered as a children.
  *)
@@ -2950,9 +2949,222 @@ let reduce_import (ec : enclave_content) =
   in
   List.fold_left combine (List.hd imported_ec_list) (List.tl imported_ec_list)
 
+(* https://github.com/ocaml-community/yojson/issues/54 *)
+let update key f (json : Yojson.Basic.t) =
+  let rec update_json_obj = function
+    | [] -> ( match f None with None -> [] | Some v -> [ (key, v) ])
+    | ((k, v) as m) :: tl ->
+        if k = key then
+          match f (Some v) with
+          | None -> update_json_obj tl
+          | Some v' -> if v' == v then m :: tl else (k, v') :: tl
+        else m :: update_json_obj tl
+  in
+  match json with `Assoc obj -> `Assoc (update_json_obj obj) | _ -> json
+
+let add k v = update k (fun _ -> Some v)
+let remove k = update k (fun _ -> None)
+
+let rec find_param_idx (name : string) (pds : Ast.pdecl list) =
+  match pds with
+  | [] -> raise Not_found
+  | h_pd :: t_pds ->
+      let _, declr = h_pd in
+      if declr.Ast.identifier = name then 0 else 1 + find_param_idx name t_pds
+
+let ps2json (ps : Ast.attr_value) (pds : Ast.pdecl list) : Yojson.Basic.t =
+  match ps with
+  | Ast.AString str ->
+      let co_param_pos = find_param_idx str pds in
+      `Assoc [ ("co_param", `String str); ("co_param_pos", `Int co_param_pos) ]
+  | Ast.ANumber num -> `Int num
+
+let dims2json (dims : int list) (param_json : Yojson.Basic.t ref) =
+  match dims with
+  | [] -> ()
+  | _ ->
+      param_json := !param_json |> add "c_array" (`Bool true);
+      param_json := !param_json |> add "dim_str" (`String (get_array_dims dims));
+      param_json :=
+        !param_json
+        |> add "c_array_total_count"
+             (`Int (List.fold_left (fun acc i -> acc * i) 1 dims));
+      param_json := !param_json |> add "c_array_count" (`Int (List.hd dims))
+
+(* https://stackoverflow.com/questions/1584758/how-do-i-strip-whitespace-from-a-string-in-ocaml *)
+let strip (str : string) : string =
+  let str = Str.replace_first (Str.regexp "^ +") "" str in
+  Str.replace_first (Str.regexp " +$") "" str
+
+(* Feed it witl e.g. "[10][20]" *)
+let rec get_array_dims_from_str (dims_str : string) : int list =
+  if dims_str = "" then []
+  else
+    let dim_regex = Str.regexp "\\[\\([^]]+?\\)\\]" in
+    ignore (Str.search_forward dim_regex dims_str 0);
+    let m_end = Str.match_end () in
+    let dim_str = strip (Str.matched_group 1 dims_str) in
+    let dim = int_of_string dim_str in
+    let remained_str = Str.string_after dims_str m_end in
+    dim :: get_array_dims_from_str remained_str
+
+let get_array_dims_in_header (ty : Ast.atype) (header_name : string) : int list
+    =
+  let ic = open_in (Util.get_header_path header_name) in
+
+  let file_content_str = ref (really_input_string ic (in_channel_length ic)) in
+  let comment_regex = Str.regexp "\\(/\\*\\(.\\|\n\\)*?\\*/\\|//.*?\n\\)" in
+  file_content_str := Str.global_replace comment_regex "" !file_content_str;
+  let typedef_regex =
+    Str.regexp
+      ("typedef[ \n\r\t]+[A-Za-z0-9_]+?[ \n\r\t]+" ^ Ast.get_tystr ty
+     ^ "\\(.*\\);")
+  in
+  let dims = ref [] in
+  (try
+     ignore (Str.search_forward typedef_regex !file_content_str 0);
+     let dims_str = Str.matched_group 1 !file_content_str in
+     dims := get_array_dims_from_str dims_str
+   with Not_found -> ());
+  (* close the input channel *)
+  close_in ic;
+  !dims
+
+let rec get_array_dims_in_headers (ty : Ast.atype)
+    (header_name_list : string list) =
+  match header_name_list with
+  | [] -> []
+  | h :: t -> (
+      let dims = get_array_dims_in_header ty h in
+      match dims with [] -> get_array_dims_in_headers ty t | _ -> dims)
+
+let param2json (pd : Ast.pdecl) (pds : Ast.pdecl list) (ec : enclave_content) =
+  let param_json = ref (Yojson.Basic.from_string "{}") in
+  let pty, declr = pd in
+  param_json := !param_json |> add "name" (`String declr.Ast.identifier);
+
+  let dims = declr.Ast.array_dims in
+  dims2json dims param_json;
+
+  (match pty with
+  | Ast.PTVal ty ->
+      param_json := !param_json |> add "type" (`String (Ast.get_tystr ty))
+  | Ast.PTPtr (ty, attr) -> (
+      param_json := !param_json |> add "type" (`String (Ast.get_tystr ty));
+      param_json :=
+        !param_json |> add "user_check" (`Bool (not attr.Ast.pa_chkptr));
+      param_json := !param_json |> add "string" (`Bool attr.Ast.pa_isstr);
+      param_json := !param_json |> add "wstring" (`Bool attr.Ast.pa_iswstr);
+      param_json := !param_json |> add "isptr" (`Bool attr.Ast.pa_isptr);
+      param_json := !param_json |> add "readonly" (`Bool attr.Ast.pa_rdonly);
+
+      if attr.Ast.pa_isary then (
+        assert (List.length dims == 0);
+        param_json := !param_json |> add "isary" (`Bool true);
+        let isary_dims =
+          get_array_dims_in_headers (Ast.get_param_atype pty) ec.include_list
+        in
+        assert (List.length isary_dims != 0);
+        dims2json isary_dims param_json);
+
+      (match attr.Ast.pa_direction with
+      | Ast.PtrIn -> param_json := !param_json |> add "in" (`Bool true)
+      | Ast.PtrOut -> param_json := !param_json |> add "out" (`Bool true)
+      | Ast.PtrInOut ->
+          param_json := !param_json |> add "in" (`Bool true);
+          param_json := !param_json |> add "out" (`Bool true)
+      | Ast.PtrNoDirection -> ());
+      (* Parse [size=xxx] *)
+      (match attr.Ast.pa_size.Ast.ps_size with
+      | Some size -> param_json := !param_json |> add "size" (ps2json size pds)
+      | None -> ());
+      (* Parse [count=xxx] *)
+      match attr.Ast.pa_size.Ast.ps_count with
+      | Some count ->
+          param_json := !param_json |> add "count" (ps2json count pds)
+      | None -> ()));
+  !param_json
+
+let tf2json (tf : Ast.trusted_func) (ec : enclave_content) =
+  let func_json = ref (Yojson.Basic.from_string "{}") in
+  func_json :=
+    !func_json
+    |> add "return"
+         (`Assoc
+           [ ("type", `String (Ast.get_tystr tf.Ast.tf_fdecl.Ast.rtype)) ]);
+  func_json := !func_json |> add "switchless" (`Bool tf.Ast.tf_is_switchless);
+  func_json := !func_json |> add "public" (`Bool (not tf.Ast.tf_is_priv));
+  let params_json = ref (Yojson.Basic.from_string "{}") in
+  List.iteri
+    (fun idx pd ->
+      params_json :=
+        !params_json
+        |> add (string_of_int idx) (param2json pd tf.Ast.tf_fdecl.Ast.plist ec))
+    tf.Ast.tf_fdecl.Ast.plist;
+  func_json := !func_json |> add "parameter" !params_json;
+  !func_json
+
+let rec str_list2json (l : string list) : Yojson.Basic.t =
+  match l with
+  | [] -> `List []
+  | h :: t -> (
+      match str_list2json t with
+      | `List il -> `List (`String h :: il)
+      | _ -> raise (Failure "Should be `List of 'a list"))
+
+let uf2json (uf : Ast.untrusted_func) (ec : enclave_content) =
+  let func_json = ref (Yojson.Basic.from_string "{}") in
+  func_json :=
+    !func_json
+    |> add "return"
+         (`Assoc
+           [ ("type", `String (Ast.get_tystr uf.Ast.uf_fdecl.Ast.rtype)) ]);
+  func_json := !func_json |> add "switchless" (`Bool uf.Ast.uf_is_switchless);
+  func_json :=
+    !func_json |> add "propagate_errno" (`Bool uf.Ast.uf_propagate_errno);
+  func_json :=
+    !func_json
+    |> add "call_conv"
+         (`String (Ast.get_call_conv_str uf.Ast.uf_fattr.Ast.fa_convention));
+  func_json :=
+    !func_json |> add "dllimport" (`Bool uf.Ast.uf_fattr.Ast.fa_dllimport);
+  func_json :=
+    !func_json |> add "allow_list" (str_list2json uf.Ast.uf_allow_list);
+  let params_json = ref (Yojson.Basic.from_string "{}") in
+  List.iteri
+    (fun idx pd ->
+      params_json :=
+        !params_json
+        |> add (string_of_int idx) (param2json pd uf.Ast.uf_fdecl.Ast.plist ec))
+    uf.Ast.uf_fdecl.Ast.plist;
+  func_json := !func_json |> add "parameter" !params_json;
+  !func_json
+
+let ec2json_file (ec : enclave_content) : unit =
+  let json = ref (Yojson.Basic.from_string "{}") in
+  let edl_file_name : string = ec.file_shortnm ^ ".edl.json" in
+  json := !json |> add "FileName" (`String edl_file_name);
+  (* Process trusted functions *)
+  List.iter
+    (fun tf -> json := !json |> add tf.Ast.tf_fdecl.Ast.fname (tf2json tf ec))
+    ec.tfunc_decls;
+  (* Process untrusted functions *)
+  List.iter
+    (fun uf -> json := !json |> add uf.Ast.uf_fdecl.Ast.fname (uf2json uf ec))
+    ec.ufunc_decls;
+  (* Output it to xxx.edl.json *)
+  let oc = open_out edl_file_name in
+  try
+    Yojson.Basic.pretty_to_channel oc !json;
+    close_out oc
+  with e ->
+    close_out_noerr oc;
+    raise e
+
 (* Generate the Enclave code. *)
 let gen_enclave_code (e : Ast.enclave) (ep : edger8r_params) =
   let ec = reduce_import (parse_enclave_ast e) in
+  ignore (ec2json_file ec);
   g_use_prefix := ep.use_prefix;
   g_untrusted_dir := ep.untrusted_dir;
   g_trusted_dir := ep.trusted_dir;
