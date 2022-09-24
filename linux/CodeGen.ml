@@ -2984,7 +2984,8 @@ let dims2json (dims : int list) (param_json : Yojson.Basic.t ref) =
   | [] -> ()
   | _ ->
       param_json := !param_json |> add "c_array" (`Bool true);
-      param_json := !param_json |> add "dim_str" (`String (get_array_dims dims));
+      param_json :=
+        !param_json |> add "dims_str" (`String (get_array_dims dims));
       param_json :=
         !param_json
         |> add "c_array_total_count"
@@ -3140,18 +3141,32 @@ let uf2json (uf : Ast.untrusted_func) (ec : enclave_content) =
   func_json := !func_json |> add "parameter" !params_json;
   !func_json
 
+(* Process functions in trusted domin*)
+let trust2json (ec : enclave_content) : Yojson.Basic.t =
+  let domin_json = ref (Yojson.Basic.from_string "{}") in
+  List.iter
+    (fun tf ->
+      domin_json := !domin_json |> add tf.Ast.tf_fdecl.Ast.fname (tf2json tf ec))
+    ec.tfunc_decls;
+  !domin_json
+
+(* Process functions in untrusted domin*)
+let untrust2json (ec : enclave_content) : Yojson.Basic.t =
+  let domin_json = ref (Yojson.Basic.from_string "{}") in
+  List.iter
+    (fun uf ->
+      domin_json := !domin_json |> add uf.Ast.uf_fdecl.Ast.fname (uf2json uf ec))
+    ec.ufunc_decls;
+  !domin_json
+
 let ec2json_file (ec : enclave_content) : unit =
   let json = ref (Yojson.Basic.from_string "{}") in
-  let edl_file_name : string = ec.file_shortnm ^ ".edl.json" in
+  let edl_file_name : string =
+    !g_trusted_dir ^ separator_str ^ ec.file_shortnm ^ ".edl.json"
+  in
   json := !json |> add "FileName" (`String edl_file_name);
-  (* Process trusted functions *)
-  List.iter
-    (fun tf -> json := !json |> add tf.Ast.tf_fdecl.Ast.fname (tf2json tf ec))
-    ec.tfunc_decls;
-  (* Process untrusted functions *)
-  List.iter
-    (fun uf -> json := !json |> add uf.Ast.uf_fdecl.Ast.fname (uf2json uf ec))
-    ec.ufunc_decls;
+  json := !json |> add "trusted" (trust2json ec);
+  json := !json |> add "untrusted" (untrust2json ec);
   (* Output it to xxx.edl.json *)
   let oc = open_out edl_file_name in
   try
