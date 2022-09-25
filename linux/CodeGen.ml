@@ -3039,7 +3039,8 @@ let rec get_array_dims_in_headers (ty : Ast.atype)
       let dims = get_array_dims_in_header ty h in
       match dims with [] -> get_array_dims_in_headers ty t | _ -> dims)
 
-let param2json (pd : Ast.pdecl) (pds : Ast.pdecl list) (ec : enclave_content) =
+let rec param2json (pd : Ast.pdecl) (pds : Ast.pdecl list)
+    (include_list : string list) : Yojson.Basic.t =
   let param_json = ref (Yojson.Basic.from_string "{}") in
   let pty, declr = pd in
   param_json := !param_json |> add "name" (`String declr.Ast.identifier);
@@ -3051,6 +3052,21 @@ let param2json (pd : Ast.pdecl) (pds : Ast.pdecl list) (ec : enclave_content) =
   | Ast.PTVal ty ->
       param_json := !param_json |> add "type" (`String (Ast.get_tystr ty))
   | Ast.PTPtr (ty, attr) -> (
+      let field_json = ref (Yojson.Basic.from_string "{}") in
+      (match ty with
+      | Ast.Ptr (Ast.Struct st) ->
+          if is_structure_defined st then
+            let struct_def, deep_copy = get_struct_def st in
+            if deep_copy then
+              let sms = struct_def.Ast.smlist in
+              List.iteri
+                (fun idx sm ->
+                  field_json :=
+                    !field_json
+                    |> add (string_of_int idx) (param2json sm sms include_list))
+                sms
+      | _ -> ());
+      param_json := !param_json |> add "field" !field_json;
       param_json := !param_json |> add "type" (`String (Ast.get_tystr ty));
       param_json :=
         !param_json |> add "user_check" (`Bool (not attr.Ast.pa_chkptr));
@@ -3063,7 +3079,7 @@ let param2json (pd : Ast.pdecl) (pds : Ast.pdecl list) (ec : enclave_content) =
         assert (List.length dims == 0);
         param_json := !param_json |> add "isary" (`Bool true);
         let isary_dims =
-          get_array_dims_in_headers (Ast.get_param_atype pty) ec.include_list
+          get_array_dims_in_headers (Ast.get_param_atype pty) include_list
         in
         assert (List.length isary_dims != 0);
         dims2json isary_dims param_json);
@@ -3086,7 +3102,7 @@ let param2json (pd : Ast.pdecl) (pds : Ast.pdecl list) (ec : enclave_content) =
       | None -> ()));
   !param_json
 
-let tf2json (tf : Ast.trusted_func) (ec : enclave_content) =
+let tf2json (tf : Ast.trusted_func) (include_list : string list) =
   let func_json = ref (Yojson.Basic.from_string "{}") in
   func_json :=
     !func_json
@@ -3100,7 +3116,8 @@ let tf2json (tf : Ast.trusted_func) (ec : enclave_content) =
     (fun idx pd ->
       params_json :=
         !params_json
-        |> add (string_of_int idx) (param2json pd tf.Ast.tf_fdecl.Ast.plist ec))
+        |> add (string_of_int idx)
+             (param2json pd tf.Ast.tf_fdecl.Ast.plist include_list))
     tf.Ast.tf_fdecl.Ast.plist;
   func_json := !func_json |> add "parameter" !params_json;
   !func_json
@@ -3113,7 +3130,7 @@ let rec str_list2json (l : string list) : Yojson.Basic.t =
       | `List il -> `List (`String h :: il)
       | _ -> raise (Failure "Should be `List of 'a list"))
 
-let uf2json (uf : Ast.untrusted_func) (ec : enclave_content) =
+let uf2json (uf : Ast.untrusted_func) (include_list : string list) =
   let func_json = ref (Yojson.Basic.from_string "{}") in
   func_json :=
     !func_json
@@ -3136,7 +3153,8 @@ let uf2json (uf : Ast.untrusted_func) (ec : enclave_content) =
     (fun idx pd ->
       params_json :=
         !params_json
-        |> add (string_of_int idx) (param2json pd uf.Ast.uf_fdecl.Ast.plist ec))
+        |> add (string_of_int idx)
+             (param2json pd uf.Ast.uf_fdecl.Ast.plist include_list))
     uf.Ast.uf_fdecl.Ast.plist;
   func_json := !func_json |> add "parameter" !params_json;
   !func_json
@@ -3146,7 +3164,9 @@ let trust2json (ec : enclave_content) : Yojson.Basic.t =
   let domin_json = ref (Yojson.Basic.from_string "{}") in
   List.iter
     (fun tf ->
-      domin_json := !domin_json |> add tf.Ast.tf_fdecl.Ast.fname (tf2json tf ec))
+      domin_json :=
+        !domin_json
+        |> add tf.Ast.tf_fdecl.Ast.fname (tf2json tf ec.include_list))
     ec.tfunc_decls;
   !domin_json
 
@@ -3155,7 +3175,9 @@ let untrust2json (ec : enclave_content) : Yojson.Basic.t =
   let domin_json = ref (Yojson.Basic.from_string "{}") in
   List.iter
     (fun uf ->
-      domin_json := !domin_json |> add uf.Ast.uf_fdecl.Ast.fname (uf2json uf ec))
+      domin_json :=
+        !domin_json
+        |> add uf.Ast.uf_fdecl.Ast.fname (uf2json uf ec.include_list))
     ec.ufunc_decls;
   !domin_json
 
