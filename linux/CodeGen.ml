@@ -3066,7 +3066,12 @@ let rec param2json (pd : Ast.pdecl) (pds : Ast.pdecl list)
                     |> add (string_of_int idx) (param2json sm sms include_list))
                 sms
       | _ -> ());
-      param_json := !param_json |> add "field" !field_json;
+      let ptr_field_json =
+        Yojson.Basic.from_string "{}" |> add "field" !field_json
+      in
+      param_json :=
+        !param_json
+        |> add "field" (Yojson.Basic.from_string "{}" |> add "0" ptr_field_json);
       param_json := !param_json |> add "type" (`String (Ast.get_tystr ty));
       param_json :=
         !param_json |> add "user_check" (`Bool (not attr.Ast.pa_chkptr));
