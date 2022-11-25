@@ -70,6 +70,10 @@ let usage (progname : string) =
      --trusted             Generate trusted proxy and bridge\n\
      --untrusted-dir <dir> Specify the directory for saving untrusted code\n\
      --trusted-dir   <dir> Specify the directory for saving trusted code\n\
+     --dump-parse   <path> Dump parse results to <path> with JSON format\n\
+     --include-path <path> Specify the include path of EDL files\n\
+     \t\t\t(Necessary when --dump-parse, and typedef of isary and isptr should \
+     found in headers)\n\
      --help                Print this help message\n";
   eprintf
     "\nIf neither `--untrusted' nor `--trusted' is specified, generate both.\n";
@@ -84,6 +88,7 @@ type edger8r_params = {
   gen_trusted : bool; (* User specified `--trusted' *)
   untrusted_dir : string; (* Directory to save untrusted code *)
   trusted_dir : string; (* Directory to save trusted code *)
+  dump_parse_path : string;
 }
 
 (* The search paths are recored in the array below.
@@ -112,6 +117,7 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
   let u_dir = ref "." in
   let t_dir = ref "." in
   let files = ref [] in
+  let dump_parse_path = ref "" in
 
   let rec local_parser (args : string list) =
     match args with
@@ -127,6 +133,12 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
         | "--untrusted" ->
             untrusted := true;
             local_parser ops
+        | "--dump-parse" -> (
+            match ops with
+            | [] -> usage progname
+            | x :: xs ->
+                dump_parse_path := x;
+                local_parser xs)
         | "--trusted" ->
             trusted := true;
             local_parser ops
@@ -174,6 +186,7 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
       gen_trusted = true;
       untrusted_dir = !u_dir;
       trusted_dir = !t_dir;
+      dump_parse_path = !dump_parse_path;
     }
   in
   if !untrusted || !trusted (* User specified '--untrusted' or '--trusted' *)

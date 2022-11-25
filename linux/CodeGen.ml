@@ -3186,16 +3186,13 @@ let untrust2json (ec : enclave_content) : Yojson.Basic.t =
     ec.ufunc_decls;
   !domin_json
 
-let ec2json_file (ec : enclave_content) : unit =
+let ec2json_file (ec : enclave_content) (dump_parse_path : string) : unit =
   let json = ref (Yojson.Basic.from_string "{}") in
-  let edl_file_name : string =
-    !g_trusted_dir ^ separator_str ^ ec.file_shortnm ^ ".edl.json"
-  in
-  json := !json |> add "FileName" (`String edl_file_name);
+  json := !json |> add "FileName" (`String dump_parse_path);
   json := !json |> add "trusted" (trust2json ec);
   json := !json |> add "untrusted" (untrust2json ec);
   (* Output it to xxx.edl.json *)
-  let oc = open_out edl_file_name in
+  let oc = open_out dump_parse_path in
   try
     Yojson.Basic.pretty_to_channel oc !json;
     close_out oc
@@ -3217,10 +3214,11 @@ let gen_enclave_code (e : Ast.enclave) (ep : edger8r_params) =
   if not ep.header_only then check_priv_funcs ec;
   if Plugin.available () then Plugin.gen_edge_routines ec ep
   else (
+    if String.length ep.dump_parse_path > 0 then
+      ignore (ec2json_file ec ep.dump_parse_path);
     if ep.gen_untrusted then (
       gen_untrusted_header ec;
       if not ep.header_only then gen_untrusted_source ec);
     if ep.gen_trusted then (
-      ignore (ec2json_file ec);
       gen_trusted_header ec;
       if not ep.header_only then gen_trusted_source ec))
