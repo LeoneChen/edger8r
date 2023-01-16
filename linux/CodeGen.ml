@@ -2632,7 +2632,7 @@ let gen_ocall_table (ec : enclave_content) =
     "\t{\n" ^ ocall_members ^ "\t}\n"
   in
   sprintf
-    "static const struct {\n\
+    "const struct {\n\
      \tsize_t nr_ocall;\n\
      \tvoid * table[%d];\n\
      } %s = {\n\
