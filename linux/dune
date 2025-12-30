@@ -1,7 +1,7 @@
 (executable
  (public_name edger8r)
  (name Edger8r)
- (libraries str unix)
+ (libraries str unix yojson re)
  (modes byte))
 
 (ocamllex Lexer)
