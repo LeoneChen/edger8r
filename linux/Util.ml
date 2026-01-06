@@ -84,12 +84,17 @@ type edger8r_params = {
   gen_trusted : bool; (* User specified `--trusted' *)
   untrusted_dir : string; (* Directory to save untrusted code *)
   trusted_dir : string; (* Directory to save trusted code *)
+  export_call_table : bool;
+  gen_harness : bool;
+  dump_parse_path : string;
+  typeinfo_dirs : string list;
 }
 
 (* The search paths are recored in the array below.
  * W/o extra search paths specified, edger8r searchs from current directory.
  *)
 let search_paths = ref [| "." |]
+let include_paths = ref [| "." |]
 
 (* The path separator is usually ':' on Linux and ';' on Windows.
  * Concerning that we might compile this code with OCaml on Windows,
@@ -107,6 +112,10 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
   let u_dir = ref "." in
   let t_dir = ref "." in
   let files = ref [] in
+  let export_call_table = ref false in
+  let gen_harness = ref false in
+  let dump_parse_path = ref "" in
+  let typeinfo_dirs = ref [] in
 
   let rec local_parser (args : string list) =
     match args with
@@ -122,6 +131,39 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
         | "--untrusted" ->
             untrusted := true;
             local_parser ops
+        | "--export-call" ->
+            export_call_table := true;
+            local_parser ops
+        | "--gen-harness" ->
+            gen_harness := true;
+            local_parser ops
+        | "--max-depth" -> (
+            match ops with
+            | [] -> usage progname
+            | x :: xs ->
+                Config.g_max_recursion_depth := int_of_string x;
+                local_parser xs)
+        | "--dump-parse" -> (
+            match ops with
+            | [] -> usage progname
+            | x :: xs ->
+                dump_parse_path := x;
+                local_parser xs)
+        | "--include-path" ->
+            (* Similar to --search-path *)
+            if ops = [] then usage progname
+            else
+              let include_path_str = List.hd ops in
+              let extra_paths = splitwith path_separator include_path_str in
+              let extra_path_arry = Array.of_list extra_paths in
+              include_paths := Array.append extra_path_arry !include_paths;
+              local_parser (List.tl ops)
+        | "--typeinfo-dir" -> (
+            match ops with
+            | [] -> usage progname
+            | x :: xs ->
+                typeinfo_dirs := x :: !typeinfo_dirs;
+                local_parser xs)
         | "--trusted" ->
             trusted := true;
             local_parser ops
@@ -160,6 +202,10 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
       gen_trusted = true;
       untrusted_dir = !u_dir;
       trusted_dir = !t_dir;
+      export_call_table = !export_call_table;
+      gen_harness = !gen_harness;
+      dump_parse_path = !dump_parse_path;
+      typeinfo_dirs = List.rev !typeinfo_dirs;
     }
   in
   if !untrusted || !trusted (* User specified '--untrusted' or '--trusted' *)
@@ -185,6 +231,14 @@ let get_file_path (fname : string) =
   let fn_list = Array.to_list targets in
   try List.find Sys.file_exists fn_list
   with Not_found -> failwithf "File not found within search paths: %s\n" fname
+
+let get_header_path (fname : string) : string option =
+  let get_full_name path =
+    if Filename.is_relative fname then path ^ separator_str ^ fname else fname
+  in
+  let targets = Array.map get_full_name !include_paths in
+  let fn_list = Array.to_list targets in
+  try Some (List.find Sys.file_exists fn_list) with Not_found -> None
 
 (* Get the short name of the given file name.
  * ------------------------------------------
