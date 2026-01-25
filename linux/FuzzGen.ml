@@ -65,7 +65,7 @@ let update_typedef_info (header_path : string) : unit =
            (* Format: -TypedefDecl ... <col:1, col:36> col:36 TYPEDEF_NAME 'base_type':'base_type' *)
            let base_type_str =
              try
-               let type_re = Re.Pcre.regexp "'([^':]*)'" in
+               let type_re = Re.Pcre.regexp "'([^']*?)'" in
                let groups = Re.exec type_re line in
                Re.Group.get groups 1 |> String.trim
              with Not_found -> failwith "no canonical type for typedef?"
@@ -632,7 +632,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                               | Some dep_idx ->
                                   Buffer.add_string prerequisites_code
                                     (gen_param_rec plist dep_idx prepared prefix
-                                       depth feed_data is_ecall FUZZ_COUNT);
+                                       depth true is_ecall FUZZ_COUNT);
                                   let _, dep_declr = List.nth plist dep_idx in
                                   assert (
                                     dep_declr.identifier = dep_name
@@ -652,7 +652,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                               | Some dep_idx ->
                                   Buffer.add_string prerequisites_code
                                     (gen_param_rec plist dep_idx prepared prefix
-                                       depth feed_data is_ecall FUZZ_SIZE);
+                                       depth true is_ecall FUZZ_SIZE);
                                   let _, dep_declr = List.nth plist dep_idx in
                                   assert (
                                     dep_declr.identifier = dep_name
@@ -785,7 +785,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                               | Some dep_idx ->
                                   Buffer.add_string prerequisites_code
                                     (gen_param_rec plist dep_idx prepared prefix
-                                       depth feed_data is_ecall FUZZ_COUNT);
+                                       depth true is_ecall FUZZ_COUNT);
                                   let _, dep_declr = List.nth plist dep_idx in
                                   assert (
                                     dep_declr.identifier = dep_name
@@ -805,7 +805,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                               | Some dep_idx ->
                                   Buffer.add_string prerequisites_code
                                     (gen_param_rec plist dep_idx prepared prefix
-                                       depth feed_data is_ecall FUZZ_SIZE);
+                                       depth true is_ecall FUZZ_SIZE);
                                   let _, dep_declr = List.nth plist dep_idx in
                                   assert (
                                     dep_declr.identifier = dep_name
