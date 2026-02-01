@@ -441,12 +441,19 @@ let decl_nullify_ptr (ok : bool) (tystr : string) (var_name : string)
 let gen_sizeof_str (ty_str : string) : string =
   if ty_str = "void" then "1" else Printf.sprintf "sizeof(%s)" ty_str
 
+let gen_sizeof_str_from_ty (ty : atype) : string =
+  match ty with
+  | Foreign _ -> "1"
+  | _ ->
+      let ty_str = Ast.get_tystr ty in
+      if ty_str = "void" then "1" else Printf.sprintf "sizeof(%s)" ty_str
+
 let gen_basic_data (ty : atype) (var_access : string) (feed_data : bool)
     (data_kind : fuzz_data_kind) (indent_cnt : int) : string =
   if feed_data then
     Printf.sprintf "%sDFGetBytes(&%s, %s, \"\", %s);\n" (get_indent indent_cnt)
       var_access
-      (gen_sizeof_str (Ast.get_tystr ty))
+      (gen_sizeof_str_from_ty ty)
       (get_fuzz_data_kind_str data_kind)
   else ""
 
@@ -456,7 +463,7 @@ let gen_ptr_data (var_access : string) (count_var : string) (elety : atype)
   if feed_data then
     Printf.sprintf "%sDFGetBytes((void *)%s, %s * %s, \"\", %s);\n"
       (get_indent indent_cnt) var_access count_var
-      (gen_sizeof_str (Ast.get_tystr elety))
+      (gen_sizeof_str_from_ty elety)
       (get_fuzz_data_kind_str data_kind)
   else ""
 
@@ -609,7 +616,6 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                     inner_var_access
                 else
                   let tystr = Ast.get_tystr ty in
-                  let elem_tystr = Ast.get_tystr elety in
                   let count_var = get_count_var depth declr.identifier in
                   let count_stat =
                     if
@@ -620,7 +626,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                         "%ssize_t %s = DFGetUserCheckCount(%s, \"\");\n"
                         (get_indent (depth + 1))
                         count_var
-                        (gen_sizeof_str elem_tystr)
+                        (gen_sizeof_str_from_ty elety)
                     else
                       (* Check and prepare dependent count parameter first *)
                       let count_tag : string =
@@ -660,20 +666,20 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                                   prefix ^ dep_name
                               | None -> failwith "not find size param?"
                             else prefix ^ dep_name
-                        | None -> gen_sizeof_str elem_tystr
+                        | None -> gen_sizeof_str_from_ty elety
                       in
                       if is_ecall then
                         Printf.sprintf
                           "%ssize_t %s = ((%s) * (%s) + %s - 1 ) / %s;\n"
                           (get_indent (depth + 1))
                           count_var count_tag size_tag
-                          (gen_sizeof_str elem_tystr)
-                          (gen_sizeof_str elem_tystr)
+                          (gen_sizeof_str_from_ty elety)
+                          (gen_sizeof_str_from_ty elety)
                       else
                         Printf.sprintf "%ssize_t %s = ((%s) * (%s)) / %s;\n"
                           (get_indent (depth + 1))
                           count_var count_tag size_tag
-                          (gen_sizeof_str elem_tystr)
+                          (gen_sizeof_str_from_ty elety)
                   in
 
                   let has_inner_ptr = atype_has_pointer elety in
@@ -682,7 +688,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                       Printf.sprintf "%s%s = (%s)DFManagedCalloc(%s, %s);\n"
                         (get_indent (depth + 1))
                         inner_var_access tystr count_var
-                        (gen_sizeof_str elem_tystr)
+                        (gen_sizeof_str_from_ty elety)
                     else ""
                   in
                   let pre_code = Buffer.contents prerequisites_code in
@@ -937,10 +943,10 @@ let gen_ecall_fuzz_wrapper (tf : trusted_func) : string =
             ( (match fd.rtype with
               | Ptr _ -> PTPtr (fd.rtype, default_ptr_attr)
               | _ -> PTVal fd.rtype),
-              { identifier = "ret"; array_dims = [] } );
+              { identifier = "_fuzz_ret"; array_dims = [] } );
           ]
           0 prepared "" 0 false true FUZZ_RET,
-        ", &ret" )
+        ", &_fuzz_ret" )
   in
 
   (* Call the real ECall *)
@@ -982,9 +988,9 @@ let gen_ocall_wrapper (uf : untrusted_func) : string =
     if fd.rtype = Void then
       (Printf.sprintf "%s%s(%s);\n" (get_indent 1) fd.fname call_params, "")
     else
-      ( Printf.sprintf "%s%s ret = %s(%s);\n" (get_indent 1) ret_tystr fd.fname
-          call_params,
-        get_indent 1 ^ "return ret;\n" )
+      ( Printf.sprintf "%s%s _fuzz_ret = %s(%s);\n" (get_indent 1) ret_tystr
+          fd.fname call_params,
+        get_indent 1 ^ "return _fuzz_ret;\n" )
   in
 
   (* Modify [out] pointer parameters *)
@@ -1001,7 +1007,7 @@ let gen_ocall_wrapper (uf : untrusted_func) : string =
             ( (match fd.rtype with
               | Ptr elety -> PTPtr (fd.rtype, default_ptr_attr)
               | _ -> PTVal fd.rtype),
-              { identifier = "ret"; array_dims = [] } );
+              { identifier = "_fuzz_ret"; array_dims = [] } );
           ]
           0 prepared "" 0 true false FUZZ_RET
       in
