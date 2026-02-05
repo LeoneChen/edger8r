@@ -153,7 +153,7 @@ let is_foreign_array (pt : Ast.parameter_type) =
 let is_naked_func (fd : Ast.func_decl) =
   fd.Ast.rtype = Ast.Void && fd.Ast.plist = []
 
-(* 
+(*
  * If user only defined a trusted function w/o neither parameter nor
  * return value, the generated trusted bridge will not call any tRTS
  * routines.  If the real trusted function doesn't call tRTS function
@@ -393,10 +393,9 @@ let is_foreign_a_structure (pt : Ast.parameter_type) =
   in
   match pt with
   | Ast.PTVal atype | Ast.PTPtr (atype, _) -> is_foreign_atype atype
-  | _ -> (false, "")
 
 (* Check duplicated structure definition and illegal usage.
- *)
+         *)
 let check_structure (ec : enclave_content) =
   let trusted_fds = tf_list_to_fd_list ec.tfunc_decls in
   let untrusted_fds = uf_list_to_fd_list ec.ufunc_decls in
@@ -897,7 +896,8 @@ let gen_func_invoking (fd : Ast.func_decl)
            p0 ps)
 
 (* Generate untrusted bridge code for a given untrusted function. *)
-let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func) =
+let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func)
+    (gen_harness : bool) =
   let fd = ufunc.Ast.uf_fdecl in
   let propagate_errno = ufunc.Ast.uf_propagate_errno in
   let func_open =
@@ -913,7 +913,10 @@ let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func) =
       ms_struct_name ms_ptr_name
   in
   let call_with_pms =
-    let invoke_func = gen_func_invoking fd mk_parm_name_ubridge in
+    let invoke_func =
+      (if gen_harness then "__ocall_wrapper_" else "")
+      ^ gen_func_invoking fd mk_parm_name_ubridge
+    in
     if fd.Ast.rtype = Ast.Void then invoke_func
     else sprintf "%s = %s" (mk_parm_accessor retval_name) invoke_func
   in
@@ -1058,17 +1061,17 @@ let gen_ptr_size (ty : Ast.atype) (pattr : Ast.ptr_attr) (name : string)
   in
   sprintf "size_t %s = %s;\n" len_var
     (if pattr.Ast.pa_isary then sprintf "sizeof(%s)" (Ast.get_tystr ty)
-    else if
-    (* genrerate ms_parm_len only for ecall with string/wstring in _t.c.*)
-    (pattr.Ast.pa_isstr || pattr.Ast.pa_iswstr) && parm_name <> name
-   then sprintf "%s_len " (mk_parm_accessor name)
-    else if
-    (* genrerate strlen(param)/wcslen(param) only for ocall with string/wstring in _t.c.*)
-    pattr.Ast.pa_isstr
-   then sprintf "%s ? strlen(%s) + 1 : 0" parm_name parm_name
-    else if pattr.Ast.pa_iswstr then
-      sprintf "%s ? (wcslen(%s) + 1) * sizeof(wchar_t) : 0" parm_name parm_name
-    else do_ps_attribute pattr.Ast.pa_size)
+     else if
+       (* genrerate ms_parm_len only for ecall with string/wstring in _t.c.*)
+       (pattr.Ast.pa_isstr || pattr.Ast.pa_iswstr) && parm_name <> name
+     then sprintf "%s_len " (mk_parm_accessor name)
+     else if
+       (* genrerate strlen(param)/wcslen(param) only for ocall with string/wstring in _t.c.*)
+       pattr.Ast.pa_isstr
+     then sprintf "%s ? strlen(%s) + 1 : 0" parm_name parm_name
+     else if pattr.Ast.pa_iswstr then
+       sprintf "%s ? (wcslen(%s) + 1) * sizeof(wchar_t) : 0" parm_name parm_name
+     else do_ps_attribute pattr.Ast.pa_size)
 
 (* Find the data type of a parameter. *)
 let find_param_type (name : string) (plist : Ast.pdecl list) =
@@ -2614,7 +2617,7 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
     ^ func_close)
 
 (* It generates OCALL table and the untrusted proxy to setup OCALL table. *)
-let gen_ocall_table (ec : enclave_content) =
+let gen_ocall_table (ec : enclave_content) (export_call : bool) =
   let func_proto_ubridge =
     List.map
       (fun (uf : Ast.untrusted_func) ->
@@ -2632,18 +2635,27 @@ let gen_ocall_table (ec : enclave_content) =
     in
     "\t{\n" ^ ocall_members ^ "\t}\n"
   in
+  let get_ocall_table_addr =
+    if export_call then
+      sprintf "\nvoid *GetOCallTableAddr() { return (void *)&%s; }\n"
+        ocall_table_name
+    else ""
+  in
   sprintf
     "static const struct {\n\
      \tsize_t nr_ocall;\n\
      \tvoid * table[%d];\n\
      } %s = {\n\
      \t%d,\n\
-     %s};\n"
+     %s};\n\
+     %s\n"
     (max nr_ocall 1) ocall_table_name nr_ocall
     (if nr_ocall <> 0 then ocall_table else "\t{ NULL },\n")
+    get_ocall_table_addr
 
 (* It generates untrusted code to be saved in a `.c' file. *)
-let gen_untrusted_source (ec : enclave_content) =
+let gen_untrusted_source (ec : enclave_content) (export_call : bool)
+    (gen_harness : bool) =
   let code_fname = get_usource_name ec.file_shortnm in
   let include_hd =
     "#include \"" ^ get_uheader_short_name ec.file_shortnm ^ "\"\n"
@@ -2656,14 +2668,23 @@ let gen_untrusted_source (ec : enclave_content) =
       (Util.mk_seq 0 (List.length ec.tfunc_decls - 1))
   in
   let ubridge_list =
-    List.map (fun fd -> gen_func_ubridge ec.enclave_name fd) ec.ufunc_decls
+    List.map
+      (fun fd -> gen_func_ubridge ec.enclave_name fd gen_harness)
+      ec.ufunc_decls
+  in
+  let fuzz_header, fuzz_ecall_wrappers, fuzz_ocall_wrappers, fuzz_globals =
+    if gen_harness then FuzzGen.gen_fuzzing_code ec else ("", "", "", "")
   in
   let out_chan = open_out code_fname in
   output_string out_chan (include_hd ^ include_errno ^ "\n");
   ms_writer out_chan ec;
+  output_string out_chan fuzz_header;
+  output_string out_chan fuzz_ocall_wrappers;
   List.iter (fun s -> output_string out_chan (s ^ "\n")) ubridge_list;
-  output_string out_chan (gen_ocall_table ec);
+  output_string out_chan (gen_ocall_table ec export_call);
   List.iter (fun s -> output_string out_chan (s ^ "\n")) uproxy_list;
+  output_string out_chan fuzz_ecall_wrappers;
+  output_string out_chan fuzz_globals;
   close_out out_chan
 
 (* It generates trusted code to be saved in a `.c' file. *)
@@ -2836,7 +2857,7 @@ let check_priv_funcs (ec : enclave_content) =
  * importing file to get an `enclave_content' record, recursively.
  *
  * `ec' is the toplevel `enclave_content' record.
-
+        
  * Here, a tree reduce algorithm is used. `ec' is the root-node, each
  * `import' expression is considered as a children.
  *)
@@ -2966,7 +2987,8 @@ let gen_enclave_code (e : Ast.enclave) (ep : edger8r_params) =
   else (
     if ep.gen_untrusted then (
       gen_untrusted_header ec;
-      if not ep.header_only then gen_untrusted_source ec);
+      if not ep.header_only then
+        gen_untrusted_source ec ep.export_call_table ep.gen_harness);
     if ep.gen_trusted then (
       gen_trusted_header ec;
       if not ep.header_only then gen_trusted_source ec))

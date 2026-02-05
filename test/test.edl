@@ -1,0 +1,33 @@
+enclave {
+    union my_union_t {
+        uint32_t *union_0;
+        uint32_t **union_1;
+        uint64_t union_3;
+    };
+
+    struct my_struct_t {
+        [count=10, size=size] uint64_t **buf;
+        size_t size;
+        my_union_t my_union;
+    };
+
+    trusted {
+        public void ecall1(char val);
+        public void ecall2([user_check] char *val);
+        public char *ecall3([in, out, count=count] char *val, size_t count);
+        public int **ecall4([in, out, count=count] struct my_struct_t *val, size_t count);
+        public void ecall5([in, isptr, size=len] buffer_t buf, size_t len);
+        public void ecall6([in, out] int arr[4][5]);
+        public void ecall7([in, isary] array_t arr);
+    };
+
+    untrusted {
+        void ocall1(char val);
+        void ocall2([user_check] char *val);
+        char *ocall3([in, out, count=count] char *val, size_t count);
+        int **ocall4([in, out, count=count] struct my_struct_t *val, size_t count);
+        void ocall5([out, isptr, size=len] buffer_t buf, size_t len);
+        void ocall6([in, out] int arr[4][5]);
+        void ocall7([out, isary] array_t arr);
+    };
+};

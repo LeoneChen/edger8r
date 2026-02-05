@@ -84,6 +84,8 @@ type edger8r_params = {
   gen_trusted : bool; (* User specified `--trusted' *)
   untrusted_dir : string; (* Directory to save untrusted code *)
   trusted_dir : string; (* Directory to save trusted code *)
+  export_call_table : bool;
+  gen_harness : bool;
 }
 
 (* The search paths are recored in the array below.
@@ -107,6 +109,8 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
   let u_dir = ref "." in
   let t_dir = ref "." in
   let files = ref [] in
+  let export_call_table = ref false in
+  let gen_harness = ref false in
 
   let rec local_parser (args : string list) =
     match args with
@@ -121,6 +125,12 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
             local_parser ops
         | "--untrusted" ->
             untrusted := true;
+            local_parser ops
+        | "--export-call" ->
+            export_call_table := true;
+            local_parser ops
+        | "--gen-harness" ->
+            gen_harness := true;
             local_parser ops
         | "--trusted" ->
             trusted := true;
@@ -160,6 +170,8 @@ let rec parse_cmdline (progname : string) (cmdargs : string list) =
       gen_trusted = true;
       untrusted_dir = !u_dir;
       trusted_dir = !t_dir;
+      export_call_table = !export_call_table;
+      gen_harness = !gen_harness;
     }
   in
   if !untrusted || !trusted (* User specified '--untrusted' or '--trusted' *)
