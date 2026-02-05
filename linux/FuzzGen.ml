@@ -16,7 +16,6 @@ type fuzz_data_kind =
   | FUZZ_SIZE
   | FUZZ_COUNT
   | FUZZ_RET
-  | FUZZ_UCHECK
 
 let get_fuzz_data_kind_str (data_kind : fuzz_data_kind) : string =
   match data_kind with
@@ -26,7 +25,6 @@ let get_fuzz_data_kind_str (data_kind : fuzz_data_kind) : string =
   | FUZZ_SIZE -> "FUZZ_SIZE"
   | FUZZ_COUNT -> "FUZZ_COUNT"
   | FUZZ_RET -> "FUZZ_RET"
-  | FUZZ_UCHECK -> "FUZZ_UCHECK"
 
 let default_ptr_attr =
   {
@@ -162,16 +160,20 @@ let gen_sizeof_str_from_ty (ty : atype) : string =
 let gen_basic_data (ty : atype) (var_access : string) (feed_data : bool)
     (data_kind : fuzz_data_kind) : string =
   if feed_data then
-    Printf.sprintf "DFGetBytes(&%s, %s, \"\", %s);\n" var_access
-      (gen_sizeof_str_from_ty ty)
-      (get_fuzz_data_kind_str data_kind)
+    if data_kind == FUZZ_COUNT then
+      Printf.sprintf "%s=DFGetCount(%s);" var_access (gen_sizeof_str_from_ty ty)
+    else if data_kind == FUZZ_SIZE then
+      Printf.sprintf "%s=DFGetSize();" var_access
+    else
+      Printf.sprintf "DFGetBytes(&%s, %s, %s);\n" var_access
+        (gen_sizeof_str_from_ty ty)
+        (get_fuzz_data_kind_str data_kind)
   else ""
 
 let gen_ptr_data (var_access : string) (count_var : string) (elety : atype)
     (feed_data : bool) (data_kind : fuzz_data_kind) : string =
   if feed_data then
-    Printf.sprintf "DFGetBytes((void *)%s, %s * %s, \"\", %s);\n" var_access
-      count_var
+    Printf.sprintf "DFGetBytes((void *)%s, %s * %s, %s);\n" var_access count_var
       (gen_sizeof_str_from_ty elety)
       (get_fuzz_data_kind_str data_kind)
   else ""
@@ -179,8 +181,8 @@ let gen_ptr_data (var_access : string) (count_var : string) (elety : atype)
 let gen_ptr_data2 (var_access : string) (count_var : string)
     (elem_tystr : string) (feed_data : bool) : string =
   if feed_data then
-    Printf.sprintf "DFGetBytes((void *)%s, %s * %s, \"\", FUZZ_DATA);\n"
-      var_access count_var
+    Printf.sprintf "DFGetBytes((void *)%s, %s * %s, FUZZ_DATA);\n" var_access
+      count_var
       (gen_sizeof_str elem_tystr)
   else ""
 
@@ -297,11 +299,11 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                   failwith "not support array pointer or pointer array";
                 if attr.pa_isstr then
                   Printf.sprintf
-                    "%s = (char *)DFGetBytes(NULL, 0, \"\", FUZZ_STRING);\n"
+                    "%s = (char *)DFGetBytes(NULL, 0, FUZZ_STRING);\n"
                     inner_var_access
                 else if attr.pa_iswstr then
                   Printf.sprintf
-                    "%s = (wchar_t *)DFGetBytes(NULL, 0, \"\", FUZZ_WSTRING);\n"
+                    "%s = (wchar_t *)DFGetBytes(NULL, 0, FUZZ_WSTRING);\n"
                     inner_var_access
                 else
                   let tystr = Ast.get_tystr ty in
@@ -311,8 +313,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                       attr.pa_direction = PtrNoDirection
                       && attr.pa_size = empty_ptr_size
                     then
-                      Printf.sprintf
-                        "size_t %s = DFGetUserCheckCount(%s, \"\");\n" count_var
+                      Printf.sprintf "size_t %s=DFGetCount(%s);" count_var
                         (gen_sizeof_str_from_ty elety)
                     else
                       (* Check and prepare dependent count parameter first *)
@@ -433,23 +434,8 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                       Printf.sprintf "%s = NULL;\n" inner_var_access
                     in
                     if is_ecall then
-                      let point2enclave =
-                        if
-                          attr.pa_direction = PtrNoDirection
-                          && attr.pa_size = empty_ptr_size
-                        then
-                          let ucheck =
-                            Printf.sprintf
-                              "%s = (%s)DFGetBytes(NULL, 0, \"\", FUZZ_UCHECK);\n"
-                              inner_var_access tystr
-                          in
-                          Printf.sprintf "if (DFPointToEnclave()) { %s } else\n"
-                            ucheck
-                        else ""
-                      in
-                      Printf.sprintf
-                        "%s%sif (!DFEnableSetNull(\"\")) {\n%s{%s\n}}\n"
-                        pre_code set_null_stat point2enclave content
+                      Printf.sprintf "%s%sif (!DFSetNull()) {\n%s\n}\n" pre_code
+                        set_null_stat content
                     else pre_code ^ content
             | Foreign foreign_ty_name ->
                 if attr.pa_isstr || attr.pa_iswstr then
@@ -466,8 +452,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                       attr.pa_direction = PtrNoDirection
                       && attr.pa_size = empty_ptr_size
                     then
-                      Printf.sprintf
-                        "size_t %s = DFGetUserCheckCount(%s, \"\");\n" count_var
+                      Printf.sprintf "size_t %s=DFGetCount(%s);" count_var
                         (gen_sizeof_str var_deref_access)
                     else
                       (* Check and prepare dependent count parameter first *)
@@ -544,8 +529,8 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                   if (not is_ecall) && pre_code <> "" then
                     failwith "ocall has precode?";
                   if is_ecall then
-                    Printf.sprintf "%s%sif (!DFEnableSetNull(\"\")) {\n%s\n}\n"
-                      pre_code set_null_stat content
+                    Printf.sprintf "%s%sif (!DFSetNull()) {\n%s\n}\n" pre_code
+                      set_null_stat content
                   else pre_code ^ content)
                 else failwith "foreign isn't isary/isptr?"
             | _ ->
@@ -588,8 +573,7 @@ let gen_all_params_prepare (fd : func_decl) (is_ecall : bool) : string =
               let inner_code =
                 gen_param_rec fd.plist idx prepared "" 0 true false FUZZ_DATA
               in
-              Printf.sprintf "if (DFEnableModifyOCallRet(\"\")) {\n%s\n}\n"
-                inner_code
+              Printf.sprintf "if (DFModifyOCallRet()) {\n%s\n}\n" inner_code
           | _ -> "")
       fd.plist
   in
@@ -688,7 +672,7 @@ let gen_ocall_wrapper (uf : untrusted_func) : string =
           ]
           0 prepared "" 0 true false FUZZ_RET
       in
-      Printf.sprintf "if (DFEnableModifyOCallRet(\"\")) {\n%s\n}\n" inner_code
+      Printf.sprintf "if (DFModifyOCallRet()) {\n%s\n}\n" inner_code
   in
 
   let func_close = "}\n" in
@@ -755,17 +739,15 @@ let gen_fuzzing_code (ec : enclave_content) : string * string * string * string
      FUZZ_SIZE,\n\
      FUZZ_COUNT,\n\
      FUZZ_RET,\n\
-     FUZZ_UCHECK,\n\
      };\n\
      /* DF Runtime function declarations */\n\
-     extern uint8_t* DFGetBytes(void* ptr, size_t byteArrLen, const char* \
-     cStrAsParamID, enum FuzzDataTy dataType);\n\
-     extern size_t DFGetUserCheckCount(size_t eleSize, const char \
-     *cStrAsParamID);\n\
+     extern uint8_t* DFGetBytes(void* ptr, size_t byteArrLen, enum FuzzDataTy \
+     dataType);\n\
+     extern size_t DFGetCount(size_t size);\n\
+     extern size_t DFGetSize();\n\
      extern void *DFManagedCalloc(size_t count, size_t size);\n\
-     extern int DFEnableSetNull(const char *cStrAsParamID);\n\
-     extern int DFEnableModifyOCallRet(const char *cParamID);\n\
-     extern int DFPointToEnclave();\n\
+     extern int DFSetNull();\n\
+     extern int DFModifyOCallRet();\n\
      extern sgx_enclave_id_t __hidden_sgxfuzzer_harness_global_eid;\n\n"
   in
 
