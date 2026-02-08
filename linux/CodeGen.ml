@@ -914,7 +914,13 @@ let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func)
   in
   let call_with_pms =
     let invoke_func =
-      (if gen_harness then "__ocall_wrapper_" else "")
+      (if
+         gen_harness
+         && not
+              (String.length fd.Ast.fname >= 12
+              && String.sub fd.Ast.fname 0 12 = "sgxsan_ocall")
+       then "__ocall_wrapper_"
+       else "")
       ^ gen_func_invoking fd mk_parm_name_ubridge
     in
     if fd.Ast.rtype = Ast.Void then invoke_func
