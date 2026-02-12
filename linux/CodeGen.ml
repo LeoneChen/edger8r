@@ -895,11 +895,37 @@ let gen_func_invoking (fd : Ast.func_decl)
            (fun acc (pty, dlr) -> acc ^ ", " ^ mk_parm_name pty dlr)
            p0 ps)
 
+let gen_hooked_func_invoking (fd : Ast.func_decl)
+    (mk_parm_name : Ast.parameter_type -> Ast.declarator -> string) =
+  let wrapper_name = "__ocall_wrapper_" ^ fd.Ast.fname in
+  let param_list =
+    match fd.Ast.plist with
+    | [] -> ""
+    | (pt, (declr : Ast.declarator)) :: ps ->
+        let p0 = mk_parm_name pt declr in
+        List.fold_left
+          (fun acc (pty, dlr) -> acc ^ ", " ^ mk_parm_name pty dlr)
+          p0 ps
+  in
+  (* Generate ternary operator for expression context *)
+  sprintf "(%s ? %s(%s) : %s(%s));" wrapper_name wrapper_name param_list
+    fd.Ast.fname param_list
+
 (* Generate untrusted bridge code for a given untrusted function. *)
 let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func)
     (gen_harness : bool) =
   let fd = ufunc.Ast.uf_fdecl in
   let propagate_errno = ufunc.Ast.uf_propagate_errno in
+
+  (* Generate weak wrapper function declaration *)
+  let wrapper_name = "__ocall_wrapper_" ^ fd.Ast.fname in
+  let ret_tystr = get_ret_tystr fd in
+  let plist_str = get_plist_str fd in
+  let weak_decl =
+    sprintf "extern %s %s(%s) __attribute__((weak));\n" ret_tystr wrapper_name
+      plist_str
+  in
+
   let func_open =
     sprintf "%s\n{\n" (mk_ubridge_proto enclave_name fd.Ast.fname)
   in
@@ -913,16 +939,7 @@ let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func)
       ms_struct_name ms_ptr_name
   in
   let call_with_pms =
-    let invoke_func =
-      (if
-         gen_harness
-         && not
-              (String.length fd.Ast.fname >= 12
-              && String.sub fd.Ast.fname 0 12 = "sgxsan_ocall")
-       then "__ocall_wrapper_"
-       else "")
-      ^ gen_func_invoking fd mk_parm_name_ubridge
-    in
+    let invoke_func = gen_hooked_func_invoking fd mk_parm_name_ubridge in
     if fd.Ast.rtype = Ast.Void then invoke_func
     else sprintf "%s = %s" (mk_parm_accessor retval_name) invoke_func
   in
@@ -930,10 +947,11 @@ let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func)
     let check_pms =
       sprintf "if (%s != NULL) return SGX_ERROR_INVALID_PARAMETER;" ms_ptr_name
     in
-    sprintf "%s\t%s\n\t%s\n%s" func_open check_pms call_with_pms func_close
+    sprintf "%s%s\t%s\n\t%s\n%s" weak_decl func_open check_pms call_with_pms
+      func_close
   else
-    sprintf "%s\t%s\n\t%s\n%s\n%s" func_open declare_ms_ptr call_with_pms
-      set_errno func_close
+    sprintf "%s%s\t%s\n\t%s\n%s\n%s" weak_decl func_open declare_ms_ptr
+      call_with_pms set_errno func_close
 
 let fill_ms_field (isptr : bool) (pd : Ast.pdecl) =
   let accessor = if isptr then "->" else "." in

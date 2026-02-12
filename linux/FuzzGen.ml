@@ -277,11 +277,7 @@ and gen_param_rec (plist : pdecl list) (param_idx : int)
                         is_ecall
                     else gen_basic_data ty inner_var_access feed_data data_kind
                 | Some _ -> failwith "not a struct?"
-                | None ->
-                    if String.starts_with ~prefix:"anon" struct_ty_name then
-                      (* Anonymous struct, skip *)
-                      ""
-                    else failwith "no struct_def for non-anon Struct?")
+                | None -> failwith "no struct_def for Struct?")
             | Foreign foreign_ty_name -> (
                 match get_comp_def foreign_ty_name with
                 | Some (StructDef sd) ->
@@ -615,9 +611,8 @@ let gen_ecall_fuzz_wrapper (tf : trusted_func) : string =
 
   (* Call the real ECall *)
   let call_ecall =
-    Printf.sprintf
-      "sgx_status_t status = %s(__hidden_sgxfuzzer_harness_global_eid%s%s);\n"
-      fd.fname ret_param param_list_str
+    Printf.sprintf "sgx_status_t status = %s(__g_harness_eid%s%s);\n" fd.fname
+      ret_param param_list_str
   in
 
   let func_close = Printf.sprintf "return status;\n}\n" in
@@ -640,7 +635,8 @@ let gen_ocall_wrapper (uf : untrusted_func) : string =
   in
 
   let func_open =
-    Printf.sprintf "%s %s(%s)\n{\n" ret_tystr wrapper_name param_decl
+    Printf.sprintf "__attribute__((weak)) %s %s(%s)\n{\n" ret_tystr wrapper_name
+      param_decl
   in
 
   (* Call real OCall *)
@@ -695,7 +691,7 @@ let gen_fuzz_globals (ec : enclave_content) : string =
   let fuzz_count = List.length fuzz_ecalls in
 
   (* Global EID *)
-  let _ = "sgx_enclave_id_t __hidden_sgxfuzzer_harness_global_eid;\n\n" in
+  let _ = "sgx_enclave_id_t __g_harness_eid;\n\n" in
 
   (* ECall count *)
   let count_decl = Printf.sprintf "int gFuzzECallNum = %d;\n\n" fuzz_count in
@@ -748,7 +744,7 @@ let gen_fuzzing_code (ec : enclave_content) : string * string * string * string
      extern void *DFManagedCalloc(size_t count, size_t size);\n\
      extern int DFSetNull();\n\
      extern int DFModifyOCallRet();\n\
-     extern sgx_enclave_id_t __hidden_sgxfuzzer_harness_global_eid;\n\n"
+     extern sgx_enclave_id_t __g_harness_eid;\n\n"
   in
 
   (* Filter ECalls - exclude sgxsan_ecall_ prefix *)
