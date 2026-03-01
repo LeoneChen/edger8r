@@ -1,4 +1,4 @@
-(lang dune 3.4)
+(lang dune 3.7)
 
 (name edger8r)
 
@@ -26,3 +26,5 @@
   (topics "to describe" your project)))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project
+
+(map_workspace_root false)

@@ -81,6 +81,9 @@ let empty_ec =
     ufunc_decls = [];
   }
 
+let is_sgxsan_ocall (fname : string) : bool =
+  String.length fname >= 12 && String.sub fname 0 12 = "sgxsan_ocall"
+
 let get_tf_fname (tf : Ast.trusted_func) = tf.Ast.tf_fdecl.Ast.fname
 let is_priv_ecall (tf : Ast.trusted_func) = tf.Ast.tf_is_priv
 let is_switchless_ecall (tf : Ast.trusted_func) = tf.Ast.tf_is_switchless
@@ -153,7 +156,7 @@ let is_foreign_array (pt : Ast.parameter_type) =
 let is_naked_func (fd : Ast.func_decl) =
   fd.Ast.rtype = Ast.Void && fd.Ast.plist = []
 
-(* 
+(*
  * If user only defined a trusted function w/o neither parameter nor
  * return value, the generated trusted bridge will not call any tRTS
  * routines.  If the real trusted function doesn't call tRTS function
@@ -393,10 +396,9 @@ let is_foreign_a_structure (pt : Ast.parameter_type) =
   in
   match pt with
   | Ast.PTVal atype | Ast.PTPtr (atype, _) -> is_foreign_atype atype
-  | _ -> (false, "")
 
 (* Check duplicated structure definition and illegal usage.
- *)
+         *)
 let check_structure (ec : enclave_content) =
   let trusted_fds = tf_list_to_fd_list ec.tfunc_decls in
   let untrusted_fds = uf_list_to_fd_list ec.ufunc_decls in
@@ -896,10 +898,37 @@ let gen_func_invoking (fd : Ast.func_decl)
            (fun acc (pty, dlr) -> acc ^ ", " ^ mk_parm_name pty dlr)
            p0 ps)
 
+let gen_hooked_func_invoking (fd : Ast.func_decl)
+    (mk_parm_name : Ast.parameter_type -> Ast.declarator -> string) =
+  let wrapper_name = "_harness_" ^ fd.Ast.fname in
+  let param_list =
+    match fd.Ast.plist with
+    | [] -> ""
+    | (pt, (declr : Ast.declarator)) :: ps ->
+        let p0 = mk_parm_name pt declr in
+        List.fold_left
+          (fun acc (pty, dlr) -> acc ^ ", " ^ mk_parm_name pty dlr)
+          p0 ps
+  in
+  (* Generate ternary operator for expression context *)
+  sprintf "(%s ? %s(%s) : %s(%s));" wrapper_name wrapper_name param_list
+    fd.Ast.fname param_list
+
 (* Generate untrusted bridge code for a given untrusted function. *)
-let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func) =
+let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func)
+    (gen_harness : bool) =
   let fd = ufunc.Ast.uf_fdecl in
   let propagate_errno = ufunc.Ast.uf_propagate_errno in
+
+  (* Generate weak wrapper function declaration *)
+  let wrapper_name = "_harness_" ^ fd.Ast.fname in
+  let ret_tystr = get_ret_tystr fd in
+  let plist_str = get_plist_str fd in
+  let weak_decl =
+    sprintf "extern %s %s(%s) __attribute__((weak));\n" ret_tystr wrapper_name
+      plist_str
+  in
+
   let func_open =
     sprintf "%s\n{\n" (mk_ubridge_proto enclave_name fd.Ast.fname)
   in
@@ -913,7 +942,7 @@ let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func) =
       ms_struct_name ms_ptr_name
   in
   let call_with_pms =
-    let invoke_func = gen_func_invoking fd mk_parm_name_ubridge in
+    let invoke_func = gen_hooked_func_invoking fd mk_parm_name_ubridge in
     if fd.Ast.rtype = Ast.Void then invoke_func
     else sprintf "%s = %s" (mk_parm_accessor retval_name) invoke_func
   in
@@ -921,10 +950,11 @@ let gen_func_ubridge (enclave_name : string) (ufunc : Ast.untrusted_func) =
     let check_pms =
       sprintf "if (%s != NULL) return SGX_ERROR_INVALID_PARAMETER;" ms_ptr_name
     in
-    sprintf "%s\t%s\n\t%s\n%s" func_open check_pms call_with_pms func_close
+    sprintf "%s%s\t%s\n\t%s\n%s" weak_decl func_open check_pms call_with_pms
+      func_close
   else
-    sprintf "%s\t%s\n\t%s\n%s\n%s" func_open declare_ms_ptr call_with_pms
-      set_errno func_close
+    sprintf "%s%s\t%s\n\t%s\n%s\n%s" weak_decl func_open declare_ms_ptr
+      call_with_pms set_errno func_close
 
 let fill_ms_field (isptr : bool) (pd : Ast.pdecl) =
   let accessor = if isptr then "->" else "." in
@@ -1058,17 +1088,17 @@ let gen_ptr_size (ty : Ast.atype) (pattr : Ast.ptr_attr) (name : string)
   in
   sprintf "size_t %s = %s;\n" len_var
     (if pattr.Ast.pa_isary then sprintf "sizeof(%s)" (Ast.get_tystr ty)
-    else if
-    (* genrerate ms_parm_len only for ecall with string/wstring in _t.c.*)
-    (pattr.Ast.pa_isstr || pattr.Ast.pa_iswstr) && parm_name <> name
-   then sprintf "%s_len " (mk_parm_accessor name)
-    else if
-    (* genrerate strlen(param)/wcslen(param) only for ocall with string/wstring in _t.c.*)
-    pattr.Ast.pa_isstr
-   then sprintf "%s ? strlen(%s) + 1 : 0" parm_name parm_name
-    else if pattr.Ast.pa_iswstr then
-      sprintf "%s ? (wcslen(%s) + 1) * sizeof(wchar_t) : 0" parm_name parm_name
-    else do_ps_attribute pattr.Ast.pa_size)
+     else if
+       (* genrerate ms_parm_len only for ecall with string/wstring in _t.c.*)
+       (pattr.Ast.pa_isstr || pattr.Ast.pa_iswstr) && parm_name <> name
+     then sprintf "%s_len " (mk_parm_accessor name)
+     else if
+       (* genrerate strlen(param)/wcslen(param) only for ocall with string/wstring in _t.c.*)
+       pattr.Ast.pa_isstr
+     then sprintf "%s ? strlen(%s) + 1 : 0" parm_name parm_name
+     else if pattr.Ast.pa_iswstr then
+       sprintf "%s ? (wcslen(%s) + 1) * sizeof(wchar_t) : 0" parm_name parm_name
+     else do_ps_attribute pattr.Ast.pa_size)
 
 (* Find the data type of a parameter. *)
 let find_param_type (name : string) (plist : Ast.pdecl list) =
@@ -1106,7 +1136,11 @@ let gen_check_tbridge_length_overflow (plist : Ast.pdecl list) =
             sprintf "\tif (%s != 0 &&\n\t\t%d > (SIZE_MAX / %s)) {\n" size_str n
               size_str
       in
-      sprintf "%s\t\treturn SGX_ERROR_INVALID_PARAMETER;\n\t}" if_statement
+      sprintf
+        "%s\t\tif(_hook_tbridge_tail)_hook_tbridge_tail();return \
+         SGX_ERROR_INVALID_PARAMETER;\n\
+         \t}"
+        if_statement
     in
     let size_str =
       match attr.Ast.pa_size.Ast.ps_size with
@@ -1879,12 +1913,16 @@ let gen_tbridge_local_vars (plist : Ast.pdecl list) =
 (* It generates trusted bridge code for a trusted function. *)
 let gen_func_tbridge (fd : Ast.func_decl) (dummy_var : string) =
   let func_open =
-    sprintf "static sgx_status_t SGX_CDECL %s(void* %s)\n{\n"
+    sprintf
+      "static sgx_status_t SGX_CDECL %s(void* %s)\n\
+       {if(_hook_tbridge_head)_hook_tbridge_head();\n"
       (mk_tbridge_name fd.Ast.fname)
       ms_ptr_name
   in
   let local_vars = gen_tbridge_local_vars fd.Ast.plist in
-  let func_close = "\treturn status;\n}\n" in
+  let func_close =
+    "\tif(_hook_tbridge_tail)_hook_tbridge_tail();return status;\n}\n"
+  in
 
   let ms_struct_name = mk_ms_struct_name fd.Ast.fname in
   let declare_ms_ptr =
@@ -1899,7 +1937,10 @@ let gen_func_tbridge (fd : Ast.func_decl) (dummy_var : string) =
 
   if is_naked_func fd then
     let check_pms =
-      sprintf "if (%s != NULL) return SGX_ERROR_INVALID_PARAMETER;" ms_ptr_name
+      sprintf
+        "if (%s != NULL) {if(_hook_tbridge_tail)_hook_tbridge_tail();return \
+         SGX_ERROR_INVALID_PARAMETER;}"
+        ms_ptr_name
     in
     sprintf "%s%s%s\t%s\n\t%s\n%s" func_open local_vars dummy_var check_pms
       invoke_func func_close
@@ -1910,13 +1951,16 @@ let gen_func_tbridge (fd : Ast.func_decl) (dummy_var : string) =
       (gen_check_tbridge_length_overflow fd.Ast.plist)
       (gen_check_tbridge_ptr_parms fd.Ast.plist)
       (gen_parm_ptr_direction_pre fd.Ast.plist)
-      (if fd.Ast.rtype <> Ast.Void then update_retval else invoke_func)
+      ("if(_hook_before_ecall)_hook_before_ecall();"
+      ^ (if fd.Ast.rtype <> Ast.Void then update_retval else invoke_func)
+      ^ "if(_hook_after_ecall)_hook_after_ecall();")
       (gen_parm_ptr_direction_post fd.Ast.plist)
       (gen_err_mark fd.Ast.plist)
       (gen_parm_ptr_free_post fd.Ast.plist)
       func_close
 
-let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool) =
+let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool)
+    (set_usp_call : string) =
   let pt, declr = pd in
   let name = declr.Ast.identifier in
   let len_var = mk_len_var name in
@@ -1946,7 +1990,8 @@ let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool) =
                 if deep_copy then
                   [
                     sprintf "\tif (%s %% sizeof(*%s) != 0) {" len_var name;
-                    sprintf "\t\t%s();" sgx_ocfree_fn;
+                    sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                    "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                     "\t\treturn SGX_ERROR_INVALID_PARAMETER;";
                     "\t}";
                   ]
@@ -1955,7 +2000,8 @@ let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool) =
           | _ ->
               [
                 sprintf "\tif (%s %% sizeof(*%s) != 0) {" len_var name;
-                sprintf "\t\t%s();" sgx_ocfree_fn;
+                sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                 "\t\treturn SGX_ERROR_INVALID_PARAMETER;";
                 "\t}";
               ]
@@ -1971,7 +2017,8 @@ let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool) =
                     "\t\tif (memcpy_s(&__local_%s, sizeof(__local_%s), %s + i, \
                      sizeof(struct %s))) {"
                     name name name struct_type;
-                  sprintf "\t\t\t%s();" sgx_ocfree_fn;
+                  sprintf "\t\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                  "\t\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                   "\t\t\treturn SGX_ERROR_UNEXPECTED;";
                   "\t\t}";
                 ]
@@ -1994,7 +2041,8 @@ let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool) =
                      sizeof(__local_%s) * i), sizeof(__local_%s), &__local_%s, \
                      sizeof(__local_%s))) {"
                     name name name name;
-                  sprintf "\t\t%s();" sgx_ocfree_fn;
+                  sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                  "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                   "\t\treturn SGX_ERROR_UNEXPECTED;";
                   "\t}";
                   "}";
@@ -2013,7 +2061,8 @@ let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool) =
               [
                 sprintf "if (memcpy_s(__tmp, ocalloc_size, %s, %s)) {" name
                   len_var;
-                sprintf "\t\t%s();" sgx_ocfree_fn;
+                sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                 "\t\treturn SGX_ERROR_UNEXPECTED;";
                 "\t}";
               ]
@@ -2078,7 +2127,8 @@ let tproxy_fill_ms_field (pd : Ast.pdecl) (is_ocall_switchless : bool) =
             List.fold_left (fun acc s -> acc ^ s ^ "\n\t") "" code_template)
 
 (* Attach data pointed by structure member pointer at the end of ms. *)
-let tproxy_fill_structure (pd : Ast.pdecl) (is_ocall_switchless : bool) =
+let tproxy_fill_structure (pd : Ast.pdecl) (is_ocall_switchless : bool)
+    (set_usp_call : string) =
   let pt, declr = pd in
   let name = declr.Ast.identifier in
   let parm_accessor = mk_parm_accessor name in
@@ -2102,7 +2152,8 @@ let tproxy_fill_structure (pd : Ast.pdecl) (is_ocall_switchless : bool) =
               len_member_name;
             sprintf "\t\tif (memcpy_s(__tmp, %s, %s, %s)) {" len_member_name
               para_struct_member len_member_name;
-            sprintf "\t\t\t%s();" sgx_ocfree_fn;
+            sprintf "\t\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+            "\t\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
             "\t\t\treturn SGX_ERROR_UNEXPECTED;";
             "\t\t}";
             sprintf "\t\t%s = (%s)__tmp;" in_struct_member (Ast.get_tystr ty);
@@ -2191,6 +2242,8 @@ let gen_ocalloc_block (fname : string) (plist : Ast.pdecl list)
     (is_switchless : bool) =
   let ms_struct_name = mk_ms_struct_name fname in
   let new_param_list = List.map conv_array_to_ptr plist in
+  let get_usp_call = if is_sgxsan_ocall fname then "_usp=_get_usp();" else "" in
+  let set_usp_call = if is_sgxsan_ocall fname then "_set_usp(_usp);" else "" in
   let local_vars_block =
     sprintf
       "%s* %s = NULL;\n\
@@ -2243,7 +2296,8 @@ let gen_ocalloc_block (fname : string) (plist : Ast.pdecl list)
     else
       sprintf
         "\tif (ADD_ASSIGN_OVERFLOW(ocalloc_size, (%s != NULL) ? %s : 0))\n\
-         \t\treturn SGX_ERROR_INVALID_PARAMETER;\n"
+         \t\t{if(_hook_tproxy_tail)_hook_tproxy_tail();return \
+         SGX_ERROR_INVALID_PARAMETER;}\n"
         name (mk_len_var name)
   in
   let do_count_ocalloc_size (pd : Ast.pdecl) =
@@ -2256,9 +2310,10 @@ let gen_ocalloc_block (fname : string) (plist : Ast.pdecl list)
   let sgx_ocfree_fn = get_sgx_fname SGX_OCFREE is_switchless in
   let do_gen_ocalloc_block =
     [
-      sprintf "\n\t__tmp = %s(ocalloc_size);\n" sgx_ocalloc_fn;
+      sprintf "\n\t%s__tmp = %s(ocalloc_size);\n" get_usp_call sgx_ocalloc_fn;
       "\tif (__tmp == NULL) {\n";
-      sprintf "\t\t%s();\n" sgx_ocfree_fn;
+      sprintf "\t\t%s();%s\n" sgx_ocfree_fn set_usp_call;
+      "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();\n";
       "\t\treturn SGX_ERROR_UNEXPECTED;\n";
       "\t}\n";
       sprintf "\t%s = (%s*)__tmp;\n" ms_struct_val ms_struct_name;
@@ -2285,6 +2340,8 @@ let gen_ocalloc_block_struct_deep_copy (fname : string) (plist : Ast.pdecl list)
   let new_param_list = List.map conv_array_to_ptr plist in
   let sgx_ocalloc_fn = get_sgx_fname SGX_OCALLOC is_ocall_switchless in
   let sgx_ocfree_fn = get_sgx_fname SGX_OCFREE is_ocall_switchless in
+  let get_usp_call = if is_sgxsan_ocall fname then "_usp=_get_usp();" else "" in
+  let set_usp_call = if is_sgxsan_ocall fname then "_set_usp(_usp);" else "" in
   let count_ocalloc_size (ty : Ast.atype) (attr : Ast.ptr_attr) (name : string)
       =
     if not attr.Ast.pa_chkptr then ""
@@ -2307,7 +2364,8 @@ let gen_ocalloc_block_struct_deep_copy (fname : string) (plist : Ast.pdecl list)
                   sprintf "if (%s %% sizeof(*%s) != 0) {" in_len_ptr_var
                     (para_struct declr.Ast.identifier);
                   (* "size x count" is a multiple of sizeof type *)
-                  sprintf "\t%s();" sgx_ocfree_fn;
+                  sprintf "\t%s();%s" sgx_ocfree_fn set_usp_call;
+                  "\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                   "\treturn SGX_ERROR_INVALID_PARAMETER;";
                   "}";
                 ]
@@ -2316,7 +2374,8 @@ let gen_ocalloc_block_struct_deep_copy (fname : string) (plist : Ast.pdecl list)
             [
               gen_check_member_length ty attr declr para_struct "\t\t\t"
                 [
-                  sprintf "\t%s();" sgx_ocfree_fn;
+                  sprintf "\t%s();%s" sgx_ocfree_fn set_usp_call;
+                  "\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                   "\treturn SGX_ERROR_INVALID_PARAMETER;";
                 ];
               sprintf "%s = %s;" in_len_ptr_var
@@ -2328,7 +2387,8 @@ let gen_ocalloc_block_struct_deep_copy (fname : string) (plist : Ast.pdecl list)
                   (para_struct declr.Ast.identifier)
                   (para_struct declr.Ast.identifier)
                   in_len_ptr_var;
-                sprintf "\t%s();" sgx_ocfree_fn;
+                sprintf "\t%s();%s" sgx_ocfree_fn set_usp_call;
+                "\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                 "\treturn SGX_ERROR_INVALID_PARAMETER;";
                 "}";
                 sprintf
@@ -2336,7 +2396,8 @@ let gen_ocalloc_block_struct_deep_copy (fname : string) (plist : Ast.pdecl list)
                    0)) {"
                   (para_struct declr.Ast.identifier)
                   in_len_ptr_var;
-                sprintf "\t%s();" sgx_ocfree_fn;
+                sprintf "\t%s();%s" sgx_ocfree_fn set_usp_call;
+                "\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                 "\treturn SGX_ERROR_INVALID_PARAMETER;";
                 "}";
               ]
@@ -2365,9 +2426,10 @@ let gen_ocalloc_block_struct_deep_copy (fname : string) (plist : Ast.pdecl list)
   in
   let do_gen_ocalloc_block =
     [
-      sprintf "\n\t__tmp = %s(ocalloc_size);\n" sgx_ocalloc_fn;
+      sprintf "\n\t%s__tmp = %s(ocalloc_size);\n" get_usp_call sgx_ocalloc_fn;
       "\tif (__tmp == NULL) {\n";
-      sprintf "\t\t%s();\n" sgx_ocfree_fn;
+      sprintf "\t\t%s();%s\n" sgx_ocfree_fn set_usp_call;
+      "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();\n";
       "\t\treturn SGX_ERROR_UNEXPECTED;\n";
       "\t}\n";
     ]
@@ -2384,7 +2446,14 @@ let gen_ocalloc_block_struct_deep_copy (fname : string) (plist : Ast.pdecl list)
 let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
   let fd = ufunc.Ast.uf_fdecl in
   let propagate_errno = ufunc.Ast.uf_propagate_errno in
-  let func_open = sprintf "%s\n{\n" (gen_tproxy_proto fd) in
+  let usp_stat = if is_sgxsan_ocall fd.fname then "size_t _usp=0;" else "" in
+  let set_usp_call =
+    if is_sgxsan_ocall fd.fname then "_set_usp(_usp);" else ""
+  in
+  let func_open =
+    sprintf "%s\n{if(_hook_tproxy_head)_hook_tproxy_head();%s\n"
+      (gen_tproxy_proto fd) usp_stat
+  in
   let local_vars = gen_tproxy_local_vars fd.Ast.plist in
   let ocalloc_ms_struct =
     gen_ocalloc_block fd.Ast.fname fd.Ast.plist ufunc.Ast.uf_is_switchless
@@ -2395,7 +2464,7 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
   let sgx_ocfree_fn = get_sgx_fname SGX_OCFREE ufunc.Ast.uf_is_switchless in
   let gen_ocfree rtype plist =
     if rtype = Ast.Void && plist = [] && propagate_errno = false then ""
-    else sprintf "\t%s();\n" sgx_ocfree_fn
+    else sprintf "\t%s();%s\n" sgx_ocfree_fn set_usp_call
   in
   let handle_out_ptr plist =
     let copy_memory (ty : Ast.atype) (attr : Ast.ptr_attr)
@@ -2410,7 +2479,8 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
                 sprintf "\t\tsize_t __tmp%s;" (mk_len_var name);
                 sprintf "\t\tif (memcpy_s((void*)%s, %s, __tmp_%s, %s)) {" name
                   (mk_len_var name) name (mk_len_var name);
-                sprintf "\t\t\t%s();" sgx_ocfree_fn;
+                sprintf "\t\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                "\t\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                 "\t\t\treturn SGX_ERROR_UNEXPECTED;";
                 "\t\t}";
                 sprintf "\t\t((char*)%s)[%s - 1] = '\\0';" name
@@ -2429,7 +2499,8 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
                 sprintf "\t\tsize_t __tmp%s;" (mk_len_var name);
                 sprintf "\t\tif (memcpy_s((void*)%s, %s, __tmp_%s, %s)) {" name
                   (mk_len_var name) name (mk_len_var name);
-                sprintf "\t\t\t%s();" sgx_ocfree_fn;
+                sprintf "\t\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                "\t\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                 "\t\t\treturn SGX_ERROR_UNEXPECTED;";
                 "\t\t}";
                 sprintf
@@ -2471,7 +2542,8 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
                     gen_check_member_length ty attr declr local_struct
                       "\t\t\t\t"
                       [
-                        sprintf "\t%s();" sgx_ocfree_fn;
+                        sprintf "\t%s();%s" sgx_ocfree_fn set_usp_call;
+                        "\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                         "\treturn SGX_ERROR_INVALID_PARAMETER;";
                       ];
                     sprintf "%s = %s;" in_len_ptr_var
@@ -2484,13 +2556,15 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
                     (*pointer is not changed by untrusted code *)
                     sprintf "\t\t\t%s > %s%s) {" out_len_ptr_var in_len_ptr_var
                       check_size;
-                    sprintf "\t\t%s();" sgx_ocfree_fn;
+                    sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                    "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                     "\t\treturn SGX_ERROR_INVALID_PARAMETER;";
                     "\t}";
                     sprintf "\tif (memcpy_s(%s, %s, __tmp_member_%s, %s)) {"
                       para_struct_member in_len_ptr_var struct_name
                       out_len_ptr_var;
-                    sprintf "\t\t%s();" sgx_ocfree_fn;
+                    sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                    "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                     "\t\treturn SGX_ERROR_UNEXPECTED;";
                     "\t}";
                     "}";
@@ -2514,7 +2588,8 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
                       "\tif (memcpy_s(&__local_%s, sizeof(%s), ((%s*)__tmp_%s \
                        + i), sizeof(%s))) {"
                       name struct_type struct_type name struct_type;
-                    sprintf "\t\t%s();" sgx_ocfree_fn;
+                    sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                    "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                     "\t\treturn SGX_ERROR_UNEXPECTED;";
                     "\t}";
                   ]
@@ -2530,7 +2605,8 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
                       "\tif (memcpy_s((void*)(%s + i), sizeof(__local_%s), \
                        &__local_%s, sizeof(__local_%s))) {"
                       name name name name;
-                    sprintf "\t\t%s();" sgx_ocfree_fn;
+                    sprintf "\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                    "\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                     "\t\treturn SGX_ERROR_UNEXPECTED;";
                     "\t}";
                     "}";
@@ -2549,7 +2625,8 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
                   sprintf "\tif (%s) {" name;
                   sprintf "\t\tif (memcpy_s((void*)%s, %s, __tmp_%s, %s)) {"
                     name (mk_len_var name) name (mk_len_var name);
-                  sprintf "\t\t\t%s();" sgx_ocfree_fn;
+                  sprintf "\t\t\t%s();%s" sgx_ocfree_fn set_usp_call;
+                  "\t\t\tif(_hook_tproxy_tail)_hook_tproxy_tail();";
                   "\t\t\treturn SGX_ERROR_UNEXPECTED;";
                   "\t\t}";
                   "\t}";
@@ -2575,7 +2652,7 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
       (handle_out_ptr fd.Ast.plist)
       set_errno "\t}"
       (gen_ocfree fd.Ast.rtype fd.Ast.plist)
-      "\treturn status;\n}"
+      "\tif(_hook_tproxy_tail)_hook_tproxy_tail();return status;\n}"
   in
   let sgx_ocall_fn = get_sgx_fname SGX_OCALL ufunc.Ast.uf_is_switchless in
   let ocall_null = sprintf "status = %s(%d, NULL);\n" sgx_ocall_fn idx in
@@ -2589,21 +2666,23 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
   let func_body = ref [] in
   if is_naked_func fd && propagate_errno = false then
     sprintf "%s\t%s\t%s%s" func_open local_vars ocall_null
-      "\n\treturn status;\n}"
+      "\n\tif(_hook_tproxy_tail)_hook_tproxy_tail();return status;\n}"
   else (
     func_body := local_vars :: !func_body;
     func_body := ocalloc_ms_struct :: !func_body;
     List.iter
       (fun pd ->
         func_body :=
-          tproxy_fill_ms_field pd ufunc.Ast.uf_is_switchless :: !func_body)
+          tproxy_fill_ms_field pd ufunc.Ast.uf_is_switchless set_usp_call
+          :: !func_body)
       fd.Ast.plist;
     func_body :=
       ocalloc_struct_deep_copy ufunc.Ast.uf_is_switchless :: !func_body;
     List.iter
       (fun pd ->
         func_body :=
-          tproxy_fill_structure pd ufunc.Ast.uf_is_switchless :: !func_body)
+          tproxy_fill_structure pd ufunc.Ast.uf_is_switchless set_usp_call
+          :: !func_body)
       fd.Ast.plist;
     func_body := ocall_with_ms :: !func_body;
     func_body := "if (status == SGX_SUCCESS) {" :: !func_body;
@@ -2614,7 +2693,7 @@ let gen_func_tproxy (ufunc : Ast.untrusted_func) (idx : int) =
     ^ func_close)
 
 (* It generates OCALL table and the untrusted proxy to setup OCALL table. *)
-let gen_ocall_table (ec : enclave_content) =
+let gen_ocall_table (ec : enclave_content) (export_call : bool) =
   let func_proto_ubridge =
     List.map
       (fun (uf : Ast.untrusted_func) ->
@@ -2632,18 +2711,27 @@ let gen_ocall_table (ec : enclave_content) =
     in
     "\t{\n" ^ ocall_members ^ "\t}\n"
   in
+  let get_ocall_table_addr =
+    if export_call then
+      sprintf "\nvoid *GetOCallTableAddr() { return (void *)&%s; }\n"
+        ocall_table_name
+    else ""
+  in
   sprintf
     "static const struct {\n\
      \tsize_t nr_ocall;\n\
      \tvoid * table[%d];\n\
      } %s = {\n\
      \t%d,\n\
-     %s};\n"
+     %s};\n\
+     %s\n"
     (max nr_ocall 1) ocall_table_name nr_ocall
     (if nr_ocall <> 0 then ocall_table else "\t{ NULL },\n")
+    get_ocall_table_addr
 
 (* It generates untrusted code to be saved in a `.c' file. *)
-let gen_untrusted_source (ec : enclave_content) =
+let gen_untrusted_source (ec : enclave_content) (export_call : bool)
+    (gen_harness : bool) =
   let code_fname = get_usource_name ec.file_shortnm in
   let include_hd =
     "#include \"" ^ get_uheader_short_name ec.file_shortnm ^ "\"\n"
@@ -2656,13 +2744,15 @@ let gen_untrusted_source (ec : enclave_content) =
       (Util.mk_seq 0 (List.length ec.tfunc_decls - 1))
   in
   let ubridge_list =
-    List.map (fun fd -> gen_func_ubridge ec.enclave_name fd) ec.ufunc_decls
+    List.map
+      (fun fd -> gen_func_ubridge ec.enclave_name fd gen_harness)
+      ec.ufunc_decls
   in
   let out_chan = open_out code_fname in
   output_string out_chan (include_hd ^ include_errno ^ "\n");
   ms_writer out_chan ec;
   List.iter (fun s -> output_string out_chan (s ^ "\n")) ubridge_list;
-  output_string out_chan (gen_ocall_table ec);
+  output_string out_chan (gen_ocall_table ec export_call);
   List.iter (fun s -> output_string out_chan (s ^ "\n")) uproxy_list;
   close_out out_chan
 
@@ -2678,17 +2768,28 @@ let gen_trusted_source (ec : enclave_content) =
        #include <errno.h>\n\
        #include <mbusafecrt.h> /* for memcpy_s etc */\n\
        #include <stdlib.h> /* for malloc/free etc */\n\n\
+       void _set_usp(size_t addr);\n\
+       size_t _get_usp(void);\n\
+       void _hook_tbridge_head(void) __attribute__((weak));\n\
+       void _hook_tbridge_tail(void) __attribute__((weak));\n\
+       void _hook_tproxy_head(void) __attribute__((weak));\n\
+       void _hook_tproxy_tail(void) __attribute__((weak));\n\
+       void _hook_before_ecall() __attribute__((weak));\n\
+       void _hook_after_ecall() __attribute__((weak));\n\n\
        #define CHECK_REF_POINTER(ptr, siz) do {\t\\\n\
        \tif (!(ptr) || ! sgx_is_outside_enclave((ptr), (siz)))\t\\\n\
-       \t\treturn SGX_ERROR_INVALID_PARAMETER;\\\n\
+       \t\t{if(_hook_tbridge_tail)_hook_tbridge_tail();return \
+       SGX_ERROR_INVALID_PARAMETER;}\\\n\
        } while (0)\n\n\
        #define CHECK_UNIQUE_POINTER(ptr, siz) do {\t\\\n\
        \tif ((ptr) && ! sgx_is_outside_enclave((ptr), (siz)))\t\\\n\
-       \t\treturn SGX_ERROR_INVALID_PARAMETER;\\\n\
+       \t\t{if(_hook_tbridge_tail)_hook_tbridge_tail();return \
+       SGX_ERROR_INVALID_PARAMETER;}\\\n\
        } while (0)\n\n\
        #define CHECK_ENCLAVE_POINTER(ptr, siz) do {\t\\\n\
        \tif ((ptr) && ! sgx_is_within_enclave((ptr), (siz)))\t\\\n\
-       \t\treturn SGX_ERROR_INVALID_PARAMETER;\\\n\
+       \t\t{if(_hook_tproxy_tail)_hook_tproxy_tail();return \
+       SGX_ERROR_INVALID_PARAMETER;}\\\n\
        } while (0)\n\n\
        #define ADD_ASSIGN_OVERFLOW(a, b) (\t\\\n\
        \t((a) += (b)) < (b)\t\\\n\
@@ -2836,7 +2937,7 @@ let check_priv_funcs (ec : enclave_content) =
  * importing file to get an `enclave_content' record, recursively.
  *
  * `ec' is the toplevel `enclave_content' record.
-
+        
  * Here, a tree reduce algorithm is used. `ec' is the root-node, each
  * `import' expression is considered as a children.
  *)
@@ -2964,9 +3065,11 @@ let gen_enclave_code (e : Ast.enclave) (ep : edger8r_params) =
   if not ep.header_only then check_priv_funcs ec;
   if Plugin.available () then Plugin.gen_edge_routines ec ep
   else (
+    if ep.gen_harness then FuzzGen.gen_fuzzing_code ec;
     if ep.gen_untrusted then (
       gen_untrusted_header ec;
-      if not ep.header_only then gen_untrusted_source ec);
+      if not ep.header_only then
+        gen_untrusted_source ec ep.export_call_table ep.gen_harness);
     if ep.gen_trusted then (
       gen_trusted_header ec;
       if not ep.header_only then gen_trusted_source ec))
